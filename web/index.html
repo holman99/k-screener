@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>K-스크리너</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="K-스크리너">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="theme-color" content="#151821">
+<meta name="robots" content="noindex">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8" defer></script>
+</head>
+<body class="tab-cond">
+<header class="top">
+  <div class="brand"><span class="mark">K</span><span class="brand-t">스크리너</span></div>
+  <div class="status" id="status">불러오는 중…</div>
+  <a class="btn primary small hidden" id="btnUpdate" target="_blank" rel="noopener">지금 갱신 요청</a>
+</header>
+
+<div class="layout">
+  <aside class="side">
+    <section class="card">
+      <h3>대상 종목</h3>
+      <div class="row gap">
+        <label class="chk"><input type="checkbox" id="mKOSPI" checked> KOSPI</label>
+        <label class="chk"><input type="checkbox" id="mKOSDAQ" checked> KOSDAQ</label>
+      </div>
+      <div class="grid2">
+        <label class="lbl"><span>최소 거래대금 <span class="unit">억원</span></span><input type="number" inputmode="decimal" id="minAmount" value="10" min="0" step="1"></label>
+        <label class="lbl"><span>최소 주가 <span class="unit">원</span></span><input type="number" inputmode="decimal" id="minPrice" value="1000" min="0" step="100"></label>
+      </div>
+      <div class="row gap">
+        <label class="chk"><input type="checkbox" id="exPref" checked> 우선주 제외</label>
+        <label class="chk"><input type="checkbox" id="exSpac" checked> 스팩 제외</label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3>빠른 조건 <span class="hint">누르면 아래 조건에 추가됩니다</span></h3>
+      <div class="chips" id="presets"></div>
+    </section>
+
+    <section class="card grow">
+      <h3>내 조건 <span class="hint">모두 만족하는 종목만 찾습니다</span></h3>
+      <div id="conds"></div>
+      <div class="row gap">
+        <button class="btn ghost" id="btnAdd">+ 조건 추가</button>
+        <button class="btn ghost subtle" id="btnClear">모두 지우기</button>
+      </div>
+      <div class="saved">
+        <select id="savedSel"><option value="">저장된 조건 불러오기…</option></select>
+        <button class="btn ghost small" id="btnSave">저장</button>
+        <button class="btn ghost small subtle" id="btnDelSaved">삭제</button>
+      </div>
+    </section>
+
+    <div class="run-wrap"><button class="btn primary big" id="btnRun">스크리닝 실행</button></div>
+  </aside>
+
+  <main class="main">
+    <div id="results">
+      <div class="res-head">
+        <div><span class="count" id="count">–</span><span class="muted" id="countSub"></span></div>
+        <button class="btn ghost small" id="btnCsv" disabled>CSV 저장</button>
+      </div>
+      <div class="table-wrap">
+        <table id="tbl"><thead></thead><tbody></tbody></table>
+        <div class="placeholder" id="placeholder">조건을 고르고 <b>스크리닝 실행</b>을 누르세요.<br><span class="muted">종목을 누르면 차트가 열립니다.</span></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<nav class="tabs">
+  <button data-t="cond" class="on">조건</button>
+  <button data-t="res">결과 <span id="tabCount"></span></button>
+</nav>
+
+<div class="modal hidden" id="modal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <div class="m-info">
+        <div class="m-title" id="mTitle"></div>
+        <div class="m-sub" id="mSub"></div>
+      </div>
+      <div class="m-ctrl">
+        <div class="seg" id="ovl">
+          <button data-k="ma" class="on">이평</button>
+          <button data-k="bb">볼린저</button>
+          <button data-k="ichi">일목</button>
+        </div>
+        <div class="seg" id="period">
+          <button data-d="60">3M</button>
+          <button data-d="120" class="on">6M</button>
+          <button data-d="250">1Y</button>
+        </div>
+        <button class="btn ghost small" id="mPrev" aria-label="이전 종목">◀</button>
+        <button class="btn ghost small" id="mNext" aria-label="다음 종목">▶</button>
+      </div>
+      <button class="x" id="mClose" aria-label="닫기">×</button>
+    </div>
+    <div id="chart"></div>
+  </div>
+</div>
+
+<div class="toast hidden" id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
