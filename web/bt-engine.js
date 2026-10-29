@@ -207,7 +207,7 @@
 
   /* ---------- 백테스트 ---------- */
   function prepare(H) { // 한 번만: 기준 수익률(전체 종목 평균), 종목별 시계열
-    const D = H.D, N = H.meta.codes.length, HZ = [1, 5, 20];
+    const D = H.D, N = H.meta.codes.length, HZ = [1, 3, 5];
     H.series = []; H.bench = {};
     const sum = {}, cnt = {};
     HZ.forEach((h) => { sum[h] = new Float64Array(D); cnt[h] = new Float64Array(D); });
@@ -274,7 +274,7 @@
   }
 
   function run(H, req, progress) {
-    const D = H.D, N = H.meta.codes.length, HZ = [1, 5, 20];
+    const D = H.D, N = H.meta.codes.length, HZ = [1, 3, 5];
     const fmap = {}; req.fields.forEach((f) => (fmap[f.key] = f));
     const F = req.filters, cost = (req.cost ?? 0.25) / 100, start = Math.min(req.warmup ?? 130, D - 25);
     const conds = [], skipped = [];

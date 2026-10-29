@@ -427,7 +427,7 @@ async function renderSector(code, inf) {
   const rank = peers.findIndex((r) => r.code === code) + 1;
   P.innerHTML = `
     <div class="note"><b>${esc(inf.sector)}</b> 업종 ${peers.length}종목 · 업종 등락률은 같은 업종의 다른 종목들을 시가총액으로 가중 평균한 값입니다 (자기 자신 제외).
-    ${META.sector_source && META.sector_source.startsWith("krx") ? "분류: 거래소 업종" : "분류: 네이버 증권 업종"}</div>
+    분류: ${({ "naver-app": "네이버 증권 업종", "naver-pc": "네이버 증권 업종", "kind": "거래소 표준산업분류", demo: "데모" })[String(META.sector_source || "").replace("(이전)", "")] || "알 수 없음"}</div>
     <table class="mini"><thead><tr><th class="l">기간</th><th>이 종목</th><th>업종</th><th>차이</th></tr></thead>
     <tbody>${row(2, "2거래일 (≈48시간)")}${row(5, "5거래일 (≈1주)")}${row(20, "20거래일 (≈1달)")}</tbody></table>
     ${rank ? `<p class="muted">5거래일 등락률 기준 업종 내 ${rank}위 / ${peers.length}종목</p>` : ""}
@@ -542,7 +542,7 @@ $("#btnBt").onclick = startBacktest;
 function renderBacktest(R) {
   const p = (v, d = 2) => (v == null || Number.isNaN(v) ? "–" : `<span class="${cls(v)}">${v > 0 ? "+" : ""}${(v * 100).toFixed(d)}%</span>`);
   const pc = (v) => (v == null ? "–" : (v * 100).toFixed(1) + "%");
-  const H = [[1, "다음날"], [5, "5거래일"], [20, "20거래일"]];
+  const H = [[1, "다음날"], [3, "3거래일"], [5, "5거래일"]];
   const s5 = R.stats[5] || {};
   let verdict;
   if (!R.signals) verdict = "이 조건에 걸린 과거 사례가 없습니다. 조건을 조금 느슨하게 해 보세요.";
@@ -562,13 +562,13 @@ function renderBacktest(R) {
     <div class="tbl-x"><table class="mini bt"><thead><tr><th class="l">보유 기간</th><th>신호 수</th><th>평균 수익</th><th>중앙값</th><th>승률</th><th>시장 대비</th><th>시장 대비 승률</th><th>비용 차감</th></tr></thead><tbody>
     ${H.map(([h, lab]) => { const s = R.stats[h] || {}; return s.n ? `<tr><td class="l">${lab}</td><td>${nf0.format(s.n)}</td><td>${p(s.mean)}</td><td>${p(s.median)}</td><td>${pc(s.win)}</td><td><b>${p(s.excess)}</b></td><td>${pc(s.xwin)}</td><td>${p(s.net)}</td></tr>` : `<tr><td class="l">${lab}</td><td colspan="7" class="muted">사례 없음</td></tr>`; }).join("")}
     </tbody></table></div>
-    <p class="muted small">매수: 신호 다음 날 시가 · 매도: 보유 기간 마지막 날 종가 · 시장 = 같은 날 같은 방식으로 산 전체 종목 평균</p>
+    <p class="muted small">매수: 신호 다음 날 시가 · 매도: 다음날 = 그날 종가, 3·5거래일 = 3·5번째 거래일 종가 · 시장 = 같은 날 같은 방식으로 산 전체 종목 평균</p>
     ${R.monthly.length ? `<h4>월별 5거래일 시장 대비 성과</h4><p class="muted small">막대가 매달 고르게 같은 쪽이면 꾸준한 조건, 들쭉날쭉하면 특정 시기 운에 가깝습니다.</p>
     <div class="bars">${R.monthly.map((m) => `<div class="brow"><span class="bm">${m.m.slice(2).replace("-", ".")}</span>
       <span class="btrack"><span class="bfill ${m.x >= 0 ? "pos" : "neg"}" style="${m.x >= 0 ? "left:50%" : `right:50%`};width:${(Math.abs(m.x) / maxAbs) * 50}%"></span></span>
       <span class="bv ${cls(m.x)}">${m.x > 0 ? "+" : ""}${(m.x * 100).toFixed(2)}%</span><span class="bn">${nf0.format(m.n)}건</span></div>`).join("")}</div>` : ""}
-    ${R.recent.length ? `<h4>최근 신호</h4><div class="tbl-x"><table class="mini peers"><thead><tr><th class="l">신호일</th><th class="l">종목</th><th>다음날</th><th>5일</th><th>20일</th></tr></thead><tbody>
-    ${R.recent.slice(0, 20).map((z) => `<tr data-code="${z.code}"><td class="l">${z.date.slice(5)}</td><td class="l">${esc(names[z.code] || z.code)}</td><td>${p(z.fwd[1] ?? null, 1)}</td><td>${p(z.fwd[5] ?? null, 1)}</td><td>${p(z.fwd[20] ?? null, 1)}</td></tr>`).join("")}
+    ${R.recent.length ? `<h4>최근 신호</h4><div class="tbl-x"><table class="mini peers"><thead><tr><th class="l">신호일</th><th class="l">종목</th><th>다음날</th><th>3일</th><th>5일</th></tr></thead><tbody>
+    ${R.recent.slice(0, 20).map((z) => `<tr data-code="${z.code}"><td class="l">${z.date.slice(5)}</td><td class="l">${esc(names[z.code] || z.code)}</td><td>${p(z.fwd[1] ?? null, 1)}</td><td>${p(z.fwd[3] ?? null, 1)}</td><td>${p(z.fwd[5] ?? null, 1)}</td></tr>`).join("")}
     </tbody></table></div>` : ""}
     <h4>꼭 알아 둘 점</h4>
     <ul class="caveats">
