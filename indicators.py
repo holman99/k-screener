@@ -10,6 +10,7 @@ import pandas as pd
 MA_WINDOWS = (5, 20, 60, 120)
 ICHI_SHIFT = 26          # 일목균형표 선행/후행 이동 칸 수 (HTS에 따라 25를 쓰기도 함)
 CROSS_LOOKBACK = 120     # 골든/데드크로스 경과일을 찾을 최대 기간(거래일)
+SECTOR_PERIODS = (2, 5, 20)   # 업종 비교 기간(거래일). 2거래일 ≈ 48시간, 5거래일 ≈ 1주일
 
 
 # ---------------------------------------------------------------- 기본 함수
@@ -164,6 +165,9 @@ def snapshot_row(df, ind=None):
 
     r["hi52_gap"] = (c / last["hi52"] - 1) * 100 if not np.isnan(last["hi52"]) else np.nan
     r["lo52_gap"] = (c / last["lo52"] - 1) * 100 if not np.isnan(last["lo52"]) else np.nan
+    for n in SECTOR_PERIODS:
+        p = c_s.iloc[-1 - n] if len(c_s) > n else np.nan
+        r[f"ret{n}"] = (c / p - 1) * 100 if p and not np.isnan(p) else np.nan
     return r
 
 
@@ -242,5 +246,23 @@ FIELDS += [
 
     _f("52주", "hi52_gap", "52주 최고가 대비", unit="%", desc="0에 가까울수록 신고가 근처"),
     _f("52주", "lo52_gap", "52주 최저가 대비", unit="%"),
+
+    _f("업종 비교", "rel2", "업종 대비 초과 등락률 (2거래일)", unit="%p",
+       desc="종목 2거래일 등락률 − 같은 업종(자신 제외, 시총 가중) 등락률. 2거래일 ≈ 48시간"),
+    _f("업종 비교", "rel5", "업종 대비 초과 등락률 (5거래일)", unit="%p",
+       desc="5거래일 ≈ 1주일. +면 업종보다 강했다는 뜻"),
+    _f("업종 비교", "rel20", "업종 대비 초과 등락률 (20거래일)", unit="%p"),
+    _f("업종 비교", "sec_ret5", "소속 업종 등락률 (5거래일)", unit="%",
+       desc="업종 자체가 오르는 중인지(업종 모멘텀) 볼 때"),
+
+    _f("뉴스", "news48", "국내 기사 수 (최근 48시간)", unit="건", bt=False,
+       desc="네이버 증권 종목 뉴스 기준. 백테스트에는 쓸 수 없습니다(과거 기록 없음)"),
+    _f("뉴스", "news7d", "국내 기사 수 (최근 7일)", unit="건", bt=False),
+    _f("뉴스", "news_ratio", "기사 증가 배수 (48시간 ÷ 7일 일평균)", unit="배", bt=False,
+       desc="(48시간 기사 수 ÷ 2) ÷ (7일 기사 수 ÷ 7). 1보다 크면 평소보다 많이 언급됨"),
+    _f("뉴스", "gnews7d", "해외(영문) 기사 수 (최근 7일)", unit="건", bt=False,
+       desc="시가총액 상위 종목만 집계합니다"),
 ]
+for _f_ in FIELDS:
+    _f_.setdefault("bt", True)
 FIELD_MAP = {f["key"]: f for f in FIELDS}

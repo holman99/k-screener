@@ -31,7 +31,7 @@ async function getJSON(path, nocache) {
 }
 function toast(msg, err) {
   const t = $("#toast"); t.textContent = msg; t.className = "toast" + (err ? " err" : "");
-  clearTimeout(t._h); t._h = setTimeout(() => t.classList.add("hidden"), 3500);
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.add("hidden"), 2200);
 }
 const nf0 = new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 0 });
 const nf2 = new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
@@ -40,7 +40,7 @@ function fmt(v, unit, type, options) {
   if (type === "bool") return v ? "예" : "아니오";
   if (type === "enum") { const o = (options || []).find((o) => o.v === v); return o ? o.t : v; }
   if (unit === "%" || unit === "%p") return (v > 0 ? "+" : "") + nf2.format(v);
-  if (["억원", "원", "주", "일"].includes(unit)) return nf0.format(v);
+  if (["억원", "원", "주", "일", "건"].includes(unit)) return nf0.format(v);
   return nf2.format(v);
 }
 const cls = (v) => (v > 0 ? "up" : v < 0 ? "down" : "");
@@ -68,7 +68,8 @@ function renderStatus() {
   const ageDays = (Date.now() - d.getTime()) / 864e5;
   $("#status").innerHTML = (m.mode === "demo" ? '<span class="tag">데모</span>' : "") +
     `기준일 <b class="${ageDays > 5 ? "old" : ""}">${m.base_date.slice(2)} (${wd})</b> · ${nf0.format(m.count)}종목` +
-    `<span class="muted"> · 갱신 ${m.updated_at.slice(5)}</span>`;
+    `<span class="muted"> · 갱신 ${m.updated_at.slice(5)}</span>` +
+    (m.news && ["blocked", "no-endpoint", "error"].includes(m.news.domestic) ? ' <span class="tag warn">뉴스 수집 실패 · 이전 기사 사용</span>' : "");
   const u = githubWorkflowURL();
   if (u) { const b = $("#btnUpdate"); b.href = u; b.classList.remove("hidden"); }
 }
@@ -254,7 +255,11 @@ $("#btnRun").onclick = () => run(true);
 function columns() {
   const base = [
     { key: "name", label: "종목명", l: true }, { key: "close", label: "종가", unit: "원" },
-    { key: "chg1", label: "등락률", unit: "%" }, { key: "amount", label: "거래대금(억)", unit: "억원" },
+    { key: "chg1", label: "등락률", unit: "%" },
+    { key: "sector", label: "업종", l: true }, { key: "rel5", label: "업종 대비 5일 (%p)", unit: "%p", type: "num" },
+    { key: "news48", label: "기사 48h", unit: "건", type: "num" }, { key: "news7d", label: "기사 7일", unit: "건", type: "num" },
+    { key: "news_ratio", label: "기사 배수", unit: "배", type: "num" },
+    { key: "amount", label: "거래대금(억)", unit: "억원" },
     { key: "marcap", label: "시총(억)", unit: "억원" }, { key: "market", label: "시장", l: true },
   ];
   const extra = lastResult.columns.filter((c) => !base.some((b) => b.key === c.key))
@@ -281,6 +286,9 @@ function renderTable() {
     const v = row[c.key];
     if (c.key === "name") return `<td class="l name">${esc(v)}<small>${row.code}</small></td>`;
     if (c.key === "market") return `<td class="l"><span class="mk ${v}">${v}</span></td>`;
+    if (c.key === "sector") return `<td class="l sec">${v ? esc(v) : "–"}</td>`;
+    if (c.key === "news7d" && row.news_cap && v != null) return `<td>${nf0.format(v)}+</td>`;
+    if (c.key === "news_ratio" && v != null) return `<td class="${v >= 2 ? "hot" : ""}">${nf2.format(v)}</td>`;
     const color = (c.unit === "%" || c.unit === "%p") && c.type !== "bool" && c.type !== "enum" ? cls(v) : "";
     return `<td class="${color}">${fmt(v, c.unit, c.type, c.options)}</td>`;
   }).join("") + "</tr>").join("");
@@ -340,20 +348,95 @@ function chartSeries(j) {
 }
 
 /* ---------------- 차트 ---------------- */
+let view = "chart", SECTORS = null;
 async function openChart(code) {
   chartCode = code; $("#modal").classList.remove("hidden"); document.body.style.overflow = "hidden";
+  const inf = SNAP.find((r) => r.code === code) || {};
+  $("#mTitle").innerHTML = `${esc(inf.name || code)}<span class="code">${code} · ${inf.market || ""}${inf.sector ? " · " + esc(inf.sector) : ""}</span>`;
+  $("#mSub").innerHTML = `${META.base_date} 종가 <b>${inf.close != null ? nf0.format(inf.close) : "–"}원</b> <span class="${cls(inf.chg1)}">${inf.chg1 != null ? fmt(inf.chg1, "%") + "%" : ""}</span>` +
+    (inf.rsi != null ? ` · RSI ${nf2.format(inf.rsi)}` : "") + (inf.vol_ratio != null ? ` · 거래량 ${nf2.format(inf.vol_ratio)}배` : "");
+  showView(view);
+  if (view === "news") return renderNews(code, inf);
+  if (view === "sec") return renderSector(code, inf);
   let j;
   try { j = await getJSON(`data/c/${code}.json`); } catch (e) { toast("차트 데이터를 불러오지 못했습니다.", true); return; }
-  const inf = SNAP.find((r) => r.code === code) || {};
   // 미완성 오늘 봉은 빌드에서 이미 제외된 기준일까지만 표시
   let end = j.d.length; while (end > 0 && j.d[end - 1] > META.base_date) end--;
   ["d", "o", "h", "l", "c", "v"].forEach((k) => (j[k] = j[k].slice(0, end)));
-  const last = j.c[j.c.length - 1];
-  $("#mTitle").innerHTML = `${esc(inf.name || code)}<span class="code">${code} · ${inf.market || ""}</span>`;
-  $("#mSub").innerHTML = `${j.d[j.d.length - 1]} 종가 <b>${nf0.format(last)}원</b> <span class="${cls(inf.chg1)}">${inf.chg1 != null ? fmt(inf.chg1, "%") + "%" : ""}</span>` +
-    (inf.rsi != null ? ` · RSI ${nf2.format(inf.rsi)}` : "") + (inf.vol_ratio != null ? ` · 거래량 ${nf2.format(inf.vol_ratio)}배` : "");
-  drawChart(j, chartSeries(j));
+  if (chartCode === code && view === "chart") drawChart(j, chartSeries(j));
 }
+function showView(v) {
+  view = v;
+  [...$("#view").children].forEach((b) => b.classList.toggle("on", b.dataset.v === v));
+  $("#chart").classList.toggle("hidden", v !== "chart");
+  $("#chartCtrl").classList.toggle("hidden", v !== "chart");
+  $("#newsPane").classList.toggle("hidden", v !== "news");
+  $("#secPane").classList.toggle("hidden", v !== "sec");
+}
+$("#view").onclick = (e) => { const b = e.target.closest("button"); if (b) { view = b.dataset.v; openChart(chartCode); } };
+
+/* ---------------- 뉴스 탭 ---------------- */
+function ago(s) {
+  const d = new Date(s.replace(" ", "T") + ":00+09:00"), h = (Date.now() - d) / 36e5;
+  if (h < 1) return Math.max(1, Math.round(h * 60)) + "분 전";
+  if (h < 24) return Math.round(h) + "시간 전";
+  return s.slice(5, 10).replace("-", ".") + " " + s.slice(11, 16);
+}
+async function renderNews(code, inf) {
+  const P = $("#newsPane");
+  const naver = `https://finance.naver.com/item/news.naver?code=${code}`;
+  const link = `<a class="btn ghost small" href="${naver}" target="_blank" rel="noopener">네이버 증권에서 지금 뉴스 보기 ↗</a>`;
+  P.innerHTML = `<p class="muted">불러오는 중…</p>`;
+  let j;
+  try { j = await getJSON(`data/news/${code}.json`); }
+  catch (e) {
+    P.innerHTML = `<div class="note">이 종목은 뉴스 집계 대상이 아닙니다 (거래대금 5억원 이상 종목만 모읍니다).</div>${link}`; return;
+  }
+  if (chartCode !== code || view !== "news") return;
+  const dom = j.items.filter((i) => !i.g), glob = j.items.filter((i) => i.g);
+  const ratio = inf.news_ratio;
+  const card = (label, v, sub) => `<div class="stat"><div class="k">${label}</div><div class="v">${v}</div>${sub ? `<div class="s">${sub}</div>` : ""}</div>`;
+  const n7 = inf.news7d != null ? nf0.format(inf.news7d) + (j.capped ? "+" : "") : "–";
+  let html = `<div class="stats">
+    ${card("국내 48시간", inf.news48 != null ? nf0.format(inf.news48) + "건" : "–")}
+    ${card("국내 7일", n7 === "–" ? n7 : n7 + "건")}
+    ${card("평소 대비", ratio != null ? nf2.format(ratio) + "배" : "–", ratio != null ? (ratio >= 2 ? "평소보다 많이 언급" : ratio <= 0.5 ? "평소보다 조용함" : "평소 수준") : "7일 3건 미만")}
+    ${card("해외(영문) 7일", inf.gnews7d != null ? nf0.format(inf.gnews7d) + "건" : "–", inf.gnews7d == null ? "시총 상위만 집계" : j.eng ? esc(j.eng) : "")}
+  </div>
+  <div class="note">기사 수집 시각 ${j.fetched_at ? j.fetched_at.replace("T", " ") : "–"} · 하루 3번(08·16·20시) 갱신 · 배수 = (48시간 ÷ 2) ÷ (7일 ÷ 7)</div>
+  ${link}`;
+  const list = (arr, title) => !arr.length ? "" : `<h4>${title}</h4><ul class="news">` + arr.map((i) =>
+    `<li><a href="${esc(i.u || naver)}" target="_blank" rel="noopener"><span class="nt">${esc(i.t)}</span><span class="nm">${esc(i.s || "")} · ${ago(i.d)}</span></a></li>`).join("") + "</ul>";
+  html += list(dom, `국내 기사 (최근 ${dom.length}건)`) + list(glob, "해외(영문) 기사");
+  if (!dom.length && !glob.length) html += `<div class="note">최근 7일 동안 수집된 기사가 없습니다.</div>`;
+  P.innerHTML = html;
+}
+
+/* ---------------- 업종 탭 ---------------- */
+async function renderSector(code, inf) {
+  const P = $("#secPane");
+  if (!inf.sector) { P.innerHTML = `<div class="note">업종 분류 정보가 없는 종목입니다.</div>`; return; }
+  if (!SECTORS) { try { SECTORS = await getJSON("data/sectors.json"); } catch (e) { SECTORS = {}; } }
+  if (chartCode !== code || view !== "sec") return;
+  const S = SECTORS[inf.sector] || {};
+  const pct = (v) => (v == null ? "–" : `<span class="${cls(v)}">${fmt(v, "%")}%</span>`);
+  const pp = (v) => (v == null ? "–" : `<span class="${cls(v)}">${fmt(v, "%p")}%p</span>`);
+  const row = (p, lab) => `<tr><td class="l">${lab}</td><td>${pct(inf["ret" + p])}</td><td>${pct(inf["sec_ret" + p])}</td><td><b>${pp(inf["rel" + p])}</b></td></tr>`;
+  const peers = (S.members || []).map((c) => SNAP.find((r) => r.code === c)).filter(Boolean)
+    .sort((a, b) => (b.ret5 ?? -1e9) - (a.ret5 ?? -1e9));
+  const rank = peers.findIndex((r) => r.code === code) + 1;
+  P.innerHTML = `
+    <div class="note"><b>${esc(inf.sector)}</b> 업종 ${peers.length}종목 · 업종 등락률은 같은 업종의 다른 종목들을 시가총액으로 가중 평균한 값입니다 (자기 자신 제외).
+    ${META.sector_source && META.sector_source.startsWith("krx") ? "분류: 거래소 업종" : "분류: 네이버 증권 업종"}</div>
+    <table class="mini"><thead><tr><th class="l">기간</th><th>이 종목</th><th>업종</th><th>차이</th></tr></thead>
+    <tbody>${row(2, "2거래일 (≈48시간)")}${row(5, "5거래일 (≈1주)")}${row(20, "20거래일 (≈1달)")}</tbody></table>
+    ${rank ? `<p class="muted">5거래일 등락률 기준 업종 내 ${rank}위 / ${peers.length}종목</p>` : ""}
+    <h4>같은 업종 종목 (5거래일 등락률 순)</h4>
+    <table class="mini peers"><thead><tr><th class="l">종목</th><th>2일</th><th>5일</th><th>20일</th></tr></thead><tbody>
+    ${peers.slice(0, 40).map((r) => `<tr class="${r.code === code ? "me" : ""}" data-code="${r.code}"><td class="l">${esc(r.name)}</td><td>${pct(r.ret2)}</td><td>${pct(r.ret5)}</td><td>${pct(r.ret20)}</td></tr>`).join("")}
+    </tbody></table>`;
+}
+$("#secPane").addEventListener("click", (e) => { const tr = e.target.closest("tr[data-code]"); if (tr && tr.dataset.code !== chartCode) { view = "chart"; openChart(tr.dataset.code); } });
 function drawChart(j, s) {
   if (typeof Plotly === "undefined") { $("#chart").innerHTML = "<p style='padding:20px'>차트 도구를 불러오는 중입니다. 잠시 후 다시 눌러 주세요.</p>"; return; }
   const N = j.c.length, D = Math.min(chartDays, N), S = META.ichi_shift || 26, from = N - D;
@@ -413,10 +496,96 @@ const segClick = (sel, fn) => ($(sel).onclick = (e) => { const b = e.target.clos
 segClick("#ovl", (b) => (overlay = b.dataset.k));
 segClick("#period", (b) => (chartDays = +b.dataset.d));
 
+/* ---------------- 백테스트 ---------------- */
+let worker = null, btBusy = false;
+function closeBt() { $("#btModal").classList.add("hidden"); document.body.style.overflow = ""; }
+$("#btClose").onclick = closeBt;
+$("#btModal").onclick = (e) => { if (e.target.id === "btModal") closeBt(); };
+
+function condText(c) {
+  const f = FMAP[c.field]; if (!f) return "";
+  let lab = f.param ? f.label.replace("N일", (c.param || 20) + "일") : f.label;
+  if (f.type === "bool") return `${lab}: ${c.value == 1 ? "예" : "아니오"}`;
+  if (f.type === "enum") return `${lab}: ${(f.options.find((o) => o.v == c.value) || {}).t}`;
+  const op = { ">": ">", ">=": "≥", "<": "<", "<=": "≤" }[c.op];
+  return c.op === "between" ? `${lab}: ${c.value} ~ ${c.value2}${f.unit || ""}` : `${lab} ${op} ${c.value}${f.unit || ""}`;
+}
+
+function startBacktest() {
+  if (btBusy) return;
+  if (!META.hist) return toast("백테스트 데이터가 아직 없습니다. 다음 갱신 후 이용하세요.", true);
+  $("#btModal").classList.remove("hidden"); document.body.style.overflow = "hidden";
+  const F = filters();
+  $("#btSub").innerHTML = (conds.length ? conds.map((c) => esc(condText(c))).join(" · ") : "조건 없음 (대상 종목 전체)") +
+    `<br><span class="muted">거래대금 ${F.min_amount}억↑ · 주가 ${nf0.format(F.min_price)}원↑ · ${F.markets.join("/")}</span>`;
+  const mb = META.hist.bytes ? (META.hist.bytes / 1e6).toFixed(1) : "?";
+  $("#btBody").innerHTML = `<div class="bt-wait"><div class="prog"><div class="bar" id="btBar"></div></div><p id="btPhase">준비 중…</p>
+    <p class="muted">처음에는 과거 1년여치 주가(약 ${mb}MB)를 받습니다. 와이파이를 권장합니다. 두 번째부터는 빠릅니다.</p></div>`;
+  if (!worker) worker = new Worker("bt-worker.js");
+  btBusy = true;
+  worker.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === "progress") {
+      const bar = $("#btBar"); if (bar) bar.style.width = Math.round((m.pct || 0) * 100) + "%";
+      const ph = $("#btPhase"); if (ph) ph.textContent = m.phase;
+    } else if (m.type === "result") { btBusy = false; renderBacktest(m.result); }
+    else if (m.type === "error") { btBusy = false; $("#btBody").innerHTML = `<div class="note err">${esc(m.message)}</div>`; }
+  };
+  worker.onerror = (e) => { btBusy = false; $("#btBody").innerHTML = `<div class="note err">백테스트 중 오류가 났습니다: ${esc(e.message || "")}</div>`; };
+  worker.postMessage({
+    base: new URL("data/", location.href).href, version: META.hist.version,
+    req: { conds: conds.map(({ id, ...r }) => r), filters: F, fields: FIELDS, cost: 0.25 },
+  });
+}
+$("#btnBt").onclick = startBacktest;
+
+function renderBacktest(R) {
+  const p = (v, d = 2) => (v == null || Number.isNaN(v) ? "–" : `<span class="${cls(v)}">${v > 0 ? "+" : ""}${(v * 100).toFixed(d)}%</span>`);
+  const pc = (v) => (v == null ? "–" : (v * 100).toFixed(1) + "%");
+  const H = [[1, "다음날"], [5, "5거래일"], [20, "20거래일"]];
+  const s5 = R.stats[5] || {};
+  let verdict;
+  if (!R.signals) verdict = "이 조건에 걸린 과거 사례가 없습니다. 조건을 조금 느슨하게 해 보세요.";
+  else {
+    verdict = `5거래일 보유 기준, 신호 종목은 같은 기간 전체 종목 평균보다 평균 <b>${p(s5.excess)}</b> ${s5.excess >= 0 ? "높았고" : "낮았고"}, ` +
+      `시장보다 나았던 경우는 <b>${pc(s5.xwin)}</b>였습니다. 거래비용(${R.cost}%)을 빼면 평균 수익률은 <b>${p(s5.net)}</b>입니다.`;
+    if (s5.n < 100) verdict += ` <br><b>표본이 ${s5.n}건으로 적어</b> 우연의 영향이 클 수 있습니다.`;
+    else if (Math.abs(s5.excess) < 0.003) verdict += " 시장과 큰 차이가 없는 수준입니다.";
+  }
+  const maxAbs = Math.max(0.005, ...R.monthly.map((m) => Math.abs(m.x)));
+  const names = Object.fromEntries(SNAP.map((r) => [r.code, r.name]));
+  $("#btBody").innerHTML = `
+    <div class="verdict">${verdict}</div>
+    ${R.skipped.length ? `<div class="note warn">과거 기록이 없어 백테스트에서 뺀 조건: ${R.skipped.map(esc).join(", ")}</div>` : ""}
+    <div class="note">검증 기간 ${R.period[0]} ~ ${R.period[1]} (${R.testDays}거래일) · 대상 ${nf0.format(R.universe)}종목 ·
+      신호 ${nf0.format(R.signals)}건 (신호가 있었던 날 ${R.days}일, 하루 평균 ${(R.signals / Math.max(1, R.days)).toFixed(1)}종목) · 계산 ${(R.ms / 1000).toFixed(1)}초</div>
+    <div class="tbl-x"><table class="mini bt"><thead><tr><th class="l">보유 기간</th><th>신호 수</th><th>평균 수익</th><th>중앙값</th><th>승률</th><th>시장 대비</th><th>시장 대비 승률</th><th>비용 차감</th></tr></thead><tbody>
+    ${H.map(([h, lab]) => { const s = R.stats[h] || {}; return s.n ? `<tr><td class="l">${lab}</td><td>${nf0.format(s.n)}</td><td>${p(s.mean)}</td><td>${p(s.median)}</td><td>${pc(s.win)}</td><td><b>${p(s.excess)}</b></td><td>${pc(s.xwin)}</td><td>${p(s.net)}</td></tr>` : `<tr><td class="l">${lab}</td><td colspan="7" class="muted">사례 없음</td></tr>`; }).join("")}
+    </tbody></table></div>
+    <p class="muted small">매수: 신호 다음 날 시가 · 매도: 보유 기간 마지막 날 종가 · 시장 = 같은 날 같은 방식으로 산 전체 종목 평균</p>
+    ${R.monthly.length ? `<h4>월별 5거래일 시장 대비 성과</h4><p class="muted small">막대가 매달 고르게 같은 쪽이면 꾸준한 조건, 들쭉날쭉하면 특정 시기 운에 가깝습니다.</p>
+    <div class="bars">${R.monthly.map((m) => `<div class="brow"><span class="bm">${m.m.slice(2).replace("-", ".")}</span>
+      <span class="btrack"><span class="bfill ${m.x >= 0 ? "pos" : "neg"}" style="${m.x >= 0 ? "left:50%" : `right:50%`};width:${(Math.abs(m.x) / maxAbs) * 50}%"></span></span>
+      <span class="bv ${cls(m.x)}">${m.x > 0 ? "+" : ""}${(m.x * 100).toFixed(2)}%</span><span class="bn">${nf0.format(m.n)}건</span></div>`).join("")}</div>` : ""}
+    ${R.recent.length ? `<h4>최근 신호</h4><div class="tbl-x"><table class="mini peers"><thead><tr><th class="l">신호일</th><th class="l">종목</th><th>다음날</th><th>5일</th><th>20일</th></tr></thead><tbody>
+    ${R.recent.slice(0, 20).map((z) => `<tr data-code="${z.code}"><td class="l">${z.date.slice(5)}</td><td class="l">${esc(names[z.code] || z.code)}</td><td>${p(z.fwd[1] ?? null, 1)}</td><td>${p(z.fwd[5] ?? null, 1)}</td><td>${p(z.fwd[20] ?? null, 1)}</td></tr>`).join("")}
+    </tbody></table></div>` : ""}
+    <h4>꼭 알아 둘 점</h4>
+    <ul class="caveats">
+      <li>현재 상장된 종목만 들어 있습니다. 그동안 상장폐지된 종목이 빠져 있어 결과가 실제보다 <b>좋게</b> 나올 수 있습니다.</li>
+      <li>약 1년의 짧은 기간입니다. 상승장·하락장 한쪽에만 맞는 조건일 수 있습니다.</li>
+      <li>시가총액과 업종 분류는 지금 기준을 과거에도 그대로 썼습니다. 상한가 등으로 실제로는 못 샀을 경우도 산 것으로 계산합니다.</li>
+      <li>비용 ${R.cost}%는 매도 시 증권거래세 0.20%와 수수료를 대략 더한 값입니다.</li>
+      <li>조건을 여러 번 바꿔 가며 가장 좋은 결과를 고르면, 과거에만 맞춘 조건(과최적화)이 되기 쉽습니다.</li>
+    </ul>`;
+}
+$("#btBody").addEventListener("click", (e) => { const tr = e.target.closest("tr[data-code]"); if (tr) { closeBt(); view = "chart"; openChart(tr.dataset.code); } });
+
 /* ---------------- 시작 ---------------- */
 (async function init() {
   try { await loadData(); }
   catch (e) { console.error(e); $("#status").textContent = "아직 데이터가 없습니다. 첫 갱신이 끝날 때까지 기다려 주세요 (약 10~30분)."; return; }
+  $("#btnBt").disabled = false;
   renderPresets(); renderSaved();
   let cur = null; try { cur = JSON.parse(localStorage.getItem(LS_CUR) || "null"); } catch (e) {}
   if (cur) applyState(cur); else renderConds();

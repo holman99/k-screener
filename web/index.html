@@ -68,7 +68,10 @@
     <div id="results">
       <div class="res-head">
         <div><span class="count" id="count">–</span><span class="muted" id="countSub"></span></div>
-        <button class="btn ghost small" id="btnCsv" disabled>CSV 저장</button>
+        <div class="row gap">
+          <button class="btn primary small" id="btnBt" disabled>백테스트</button>
+          <button class="btn ghost small" id="btnCsv" disabled>CSV</button>
+        </div>
       </div>
       <div class="table-wrap">
         <table id="tbl"><thead></thead><tbody></tbody></table>
@@ -91,6 +94,12 @@
         <div class="m-sub" id="mSub"></div>
       </div>
       <div class="m-ctrl">
+        <div class="seg" id="view">
+          <button data-v="chart" class="on">차트</button>
+          <button data-v="news">뉴스</button>
+          <button data-v="sec">업종</button>
+        </div>
+        <span class="chart-ctrl" id="chartCtrl">
         <div class="seg" id="ovl">
           <button data-k="ma" class="on">이평</button>
           <button data-k="bb">볼린저</button>
@@ -101,12 +110,28 @@
           <button data-d="120" class="on">6M</button>
           <button data-d="250">1Y</button>
         </div>
+        </span>
         <button class="btn ghost small" id="mPrev" aria-label="이전 종목">◀</button>
         <button class="btn ghost small" id="mNext" aria-label="다음 종목">▶</button>
       </div>
       <button class="x" id="mClose" aria-label="닫기">×</button>
     </div>
     <div id="chart"></div>
+    <div class="pane hidden" id="newsPane"></div>
+    <div class="pane hidden" id="secPane"></div>
+  </div>
+</div>
+
+<div class="modal hidden" id="btModal">
+  <div class="modal-box bt-box">
+    <div class="modal-head">
+      <div class="m-info">
+        <div class="m-title">백테스트 <span class="code">지금 조건을 과거에 적용했다면?</span></div>
+        <div class="m-sub" id="btSub"></div>
+      </div>
+      <button class="x" id="btClose" aria-label="닫기">×</button>
+    </div>
+    <div class="pane" id="btBody"></div>
   </div>
 </div>
 
