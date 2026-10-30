@@ -206,23 +206,25 @@
   }
 
   /* ---------- 백테스트 ---------- */
+  const MAXK = 10; // 매수일 이후 최대 보유 거래일
   function prepare(H) { // 한 번만: 기준 수익률(전체 종목 평균), 종목별 시계열
-    const D = H.D, N = H.meta.codes.length, HZ = [1, 3, 5];
-    H.series = []; H.bench = {};
-    const sum = {}, cnt = {};
-    HZ.forEach((h) => { sum[h] = new Float64Array(D); cnt[h] = new Float64Array(D); });
+    const D = H.D, N = H.meta.codes.length;
+    H.series = []; H.bench = [];
+    const sum = [], cnt = [];
+    for (let k = 0; k <= MAXK; k++) { sum.push(new Float64Array(D)); cnt.push(new Float64Array(D)); }
     for (let s = 0; s < N; s++) {
       const S = stockSeries(H, s); H.series.push(S);
       for (let t = 0; t < D - 1; t++) {
         const e = S.O[t + 1]; if (!(e > 0)) continue;
-        for (const h of HZ) {
-          if (t + h >= D) continue;
-          const x = S.C[t + h]; if (isn(x)) continue;
-          sum[h][t] += x / e - 1; cnt[h][t]++;
+        for (let k = 0; k <= MAXK; k++) {
+          const d = t + 1 + k; if (d >= D) break;
+          const x = S.C[d]; if (isn(x)) continue;
+          sum[k][t] += x / e - 1; cnt[k][t]++;
         }
       }
     }
-    HZ.forEach((h) => { H.bench[h] = sum[h].map((x, t) => (cnt[h][t] ? x / cnt[h][t] : NaN_)); });
+    // bench[k][t] = 신호일 t 다음날 시가에 전체 종목을 사서, 그로부터 k거래일 뒤 종가에 판 평균 수익률
+    for (let k = 0; k <= MAXK; k++) H.bench.push(sum[k].map((x, t) => (cnt[k][t] ? x / cnt[k][t] : NaN_)));
   }
 
   function sectorRel(H) { // 날짜별 업종(자신 제외, 시총 가중) 등락률과 초과 등락률
@@ -273,8 +275,33 @@
     return null;
   }
 
+  function summarize(rows, cost, extra) {
+    const n = rows.length; if (!n) return { n: 0 };
+    const r = rows.map((z) => z.r), x = rows.map((z) => z.x);
+    const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
+    const sorted = Float64Array.from(r).sort();
+    const out = {
+      n, mean: mean(r), median: n % 2 ? sorted[(n - 1) / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2,
+      win: r.filter((v) => v > 0).length / n, excess: mean(x), xwin: x.filter((v) => v > 0).length / n,
+      net: mean(r) - cost, best: sorted[n - 1], worst: sorted[0],
+    };
+    return extra ? Object.assign(out, extra(rows)) : out;
+  }
+  function monthlyOf(rows, dates) {
+    const m = {};
+    for (const z of rows) { const k = dates[z.t].slice(0, 7); (m[k] ||= { n: 0, x: 0, r: 0 }); m[k].n++; m[k].x += z.x; m[k].r += z.r; }
+    return Object.entries(m).sort().map(([k, v]) => ({ m: k, n: v.n, x: v.x / v.n, r: v.r / v.n }));
+  }
+
+  /* 백테스트 1: 다음날 시가 −dip% 지정가 매수(못 사면 거래 없음)
+                 → 매수일 이후 N거래일째 날, 그날 시가 +tp1% 지정가 매도(못 팔면 그날 종가)
+     백테스트 2: 같은 방식으로 매수 → 매수가 대비 +tp% 익절 / −sl% 손절 / maxHold거래일째 종가 */
   function run(H, req, progress) {
-    const D = H.D, N = H.meta.codes.length, HZ = [1, 3, 5];
+    const D = H.D, N = H.meta.codes.length;
+    const P = Object.assign({ dip: 2, tp1: 5, tp: 20, sl: 10, hold: 5, horizons: [1, 3, 5] }, req.params || {});
+    const HZ = P.horizons.filter((h) => h >= 1 && h <= MAXK);
+    const hold = Math.max(1, Math.min(MAXK, Math.round(P.hold)));
+    const dip = P.dip / 100, tp1 = P.tp1 / 100, tp = P.tp / 100, sl = P.sl / 100;
     const fmap = {}; req.fields.forEach((f) => (fmap[f.key] = f));
     const F = req.filters, cost = (req.cost ?? 0.25) / 100, start = Math.min(req.warmup ?? 130, D - 25);
     const conds = [], skipped = [];
@@ -282,11 +309,10 @@
       const t = buildTest(c, fmap);
       if (t) conds.push({ ...c, test: t, f: fmap[c.field] }); else skipped.push(fmap[c.field]?.label || c.field);
     }
-    const needSector = conds.some((c) => /^(rel\d+|sec_ret\d+)$/.test(c.field));
-    if (needSector) sectorRel(H);
-    const res = {}; HZ.forEach((h) => (res[h] = { r: [], x: [] }));
-    const monthly = {}, recent = [], perDay = new Float64Array(D);
-    let signals = 0;
+    if (conds.some((c) => /^(rel\d+|sec_ret\d+)$/.test(c.field))) sectorRel(H);
+    const b1 = {}; HZ.forEach((h) => (b1[h] = []));
+    const b2 = [], recent = [], perDay = new Float64Array(D);
+    let signals = 0, fills = 0, evaluable = 0;
     for (let s = 0; s < N; s++) {
       if (s % 50 === 0 && progress) progress(s / N);
       const code = H.meta.codes[s], mk = H.meta.market[s];
@@ -314,41 +340,62 @@
         let ok = true;
         for (let k = 0; k < conds.length; k++) { const x = arrs[k][i]; if (isn(x) || !conds[k].test(x)) { ok = false; break; } }
         if (!ok) continue;
-        const e = S.O[t + 1]; if (!(e > 0)) continue;
+        const bd = t + 1, O1 = S.O[bd]; if (!(O1 > 0)) continue;   // 다음날 거래가 없으면 제외
         signals++; perDay[t]++;
-        const fwd = {};
+        const rec = { code, t, filled: false, b1: {}, b2: null };
+        recent.push(rec);
+        const limit = O1 * (1 - dip);
+        if (!(S.L[bd] <= limit)) continue;                          // 지정가까지 안 내려옴 → 거래 없음
+        const entry = limit; fills++; rec.filled = true; rec.entry = entry;
+        // ---- 백테스트 1
         for (const h of HZ) {
-          if (t + h >= D) continue;
-          const x = S.C[t + h]; if (isn(x)) continue;
-          const r = x / e - 1, ex = r - H.bench[h][t];
-          res[h].r.push(r); res[h].x.push(ex); fwd[h] = r;
-          if (h === 5) {
-            const mo = H.meta.dates[t].slice(0, 7);
-            (monthly[mo] ||= { n: 0, x: 0, r: 0 }); monthly[mo].n++; monthly[mo].x += ex; monthly[mo].r += r;
-          }
+          const d = bd + h; if (d >= D) continue;
+          const o = S.O[d], hi = S.H[d], c = S.C[d]; if (isn(o) || isn(c)) continue;
+          const tgt = o * (1 + tp1), hit = hi >= tgt, px = hit ? tgt : c;
+          const r = px / entry - 1;
+          b1[h].push({ t, r, x: r - H.bench[h][t], hit }); rec.b1[h] = r;
         }
-        recent.push({ code, t, fwd });
+        // ---- 백테스트 2
+        const stop = entry * (1 - sl), target = entry * (1 + tp);
+        let out = null;
+        if (S.L[bd] <= stop) out = { px: stop, k: 0, why: "sl" };   // 매수 당일 손절 (지정가 체결 뒤에만 더 내려갈 수 있음)
+        else for (let k = 1; k <= hold; k++) {
+          const d = bd + k; if (d >= D) break;
+          const o = S.O[d], hi = S.H[d], lo = S.L[d], c = S.C[d];
+          if (isn(o)) { if (k === hold) break; continue; }          // 거래정지일은 그냥 보유
+          if (o <= stop) { out = { px: o, k, why: "sl" }; break; }  // 갭하락으로 손절선 아래 시작
+          if (o >= target) { out = { px: o, k, why: "tp" }; break; } // 갭상승으로 익절선 위 시작
+          if (lo <= stop) { out = { px: stop, k, why: "sl" }; break; } // 같은 날 둘 다 닿으면 손절 먼저(보수적)
+          if (hi >= target) { out = { px: target, k, why: "tp" }; break; }
+          if (k === hold) { out = { px: c, k, why: "exp" }; break; }
+        }
+        if (out) {
+          const r = out.px / entry - 1;
+          b2.push({ t, r, x: r - H.bench[out.k][t], why: out.why, k: out.k });
+          rec.b2 = { r, why: out.why, k: out.k };
+        }
       }
     }
-    const stats = {};
-    for (const h of HZ) {
-      const r = res[h].r, x = res[h].x, n = r.length;
-      if (!n) { stats[h] = { n: 0 }; continue; }
-      const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
-      const sorted = Float64Array.from(r).sort();
-      stats[h] = {
-        n, mean: mean(r), median: n % 2 ? sorted[(n - 1) / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2,
-        win: r.filter((v) => v > 0).length / n, excess: mean(x), xwin: x.filter((v) => v > 0).length / n,
-        net: mean(r) - cost, best: sorted[n - 1], worst: sorted[0],
+    const stats1 = {};
+    for (const h of HZ) stats1[h] = summarize(b1[h], cost, (rows) => ({ hit: rows.filter((z) => z.hit).length / rows.length }));
+    const stats2 = summarize(b2, cost, (rows) => {
+      const by = (w) => rows.filter((z) => z.why === w);
+      const avg = (a) => (a.length ? a.reduce((s, z) => s + z.r, 0) / a.length : null);
+      return {
+        tp: by("tp").length / rows.length, sl: by("sl").length / rows.length, exp: by("exp").length / rows.length,
+        tpAvg: avg(by("tp")), slAvg: avg(by("sl")), expAvg: avg(by("exp")),
+        hold: rows.reduce((s, z) => s + z.k, 0) / rows.length,
       };
-    }
+    });
     let days = 0; for (let t = start; t < D - 1; t++) if (perDay[t]) days++;
     recent.sort((a, b) => b.t - a.t);
+    const lastH = HZ[HZ.length - 1];
     return {
-      stats, signals, days, testDays: D - 1 - start,
+      params: { ...P, hold, horizons: HZ }, signals, fills, days, testDays: D - 1 - start,
       period: [H.meta.dates[start], H.meta.dates[D - 2]],
-      monthly: Object.entries(monthly).sort().map(([m, v]) => ({ m, n: v.n, x: v.x / v.n, r: v.r / v.n })),
-      recent: recent.slice(0, 30).map((z) => ({ code: z.code, date: H.meta.dates[z.t], fwd: z.fwd })),
+      bt1: { stats: stats1, monthly: monthlyOf(b1[lastH] || [], H.meta.dates), monthlyH: lastH },
+      bt2: { stats: stats2, monthly: monthlyOf(b2, H.meta.dates) },
+      recent: recent.slice(0, 30).map((z) => ({ code: z.code, date: H.meta.dates[z.t], filled: z.filled, b1: z.b1, b2: z.b2 })),
       skipped, universe: N, cost: cost * 100,
     };
   }

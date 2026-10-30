@@ -511,6 +511,11 @@ function condText(c) {
   return c.op === "between" ? `${lab}: ${c.value} ~ ${c.value2}${f.unit || ""}` : `${lab} ${op} ${c.value}${f.unit || ""}`;
 }
 
+const LS_BT = "kscr_bt_v1";
+const BT_DEFAULT = { dip: 2, tp1: 5, tp: 20, sl: 10, hold: 5 };
+let btParams = (() => { try { return { ...BT_DEFAULT, ...JSON.parse(localStorage.getItem(LS_BT) || "{}") }; } catch (e) { return { ...BT_DEFAULT }; } })();
+let btTab = "1", lastBt = null;
+
 function startBacktest() {
   if (btBusy) return;
   if (!META.hist) return toast("백테스트 데이터가 아직 없습니다. 다음 갱신 후 이용하세요.", true);
@@ -528,56 +533,120 @@ function startBacktest() {
     if (m.type === "progress") {
       const bar = $("#btBar"); if (bar) bar.style.width = Math.round((m.pct || 0) * 100) + "%";
       const ph = $("#btPhase"); if (ph) ph.textContent = m.phase;
-    } else if (m.type === "result") { btBusy = false; renderBacktest(m.result); }
+    } else if (m.type === "result") { btBusy = false; lastBt = m.result; renderBacktest(); }
     else if (m.type === "error") { btBusy = false; $("#btBody").innerHTML = `<div class="note err">${esc(m.message)}</div>`; }
   };
   worker.onerror = (e) => { btBusy = false; $("#btBody").innerHTML = `<div class="note err">백테스트 중 오류가 났습니다: ${esc(e.message || "")}</div>`; };
   worker.postMessage({
     base: new URL("data/", location.href).href, version: META.hist.version,
-    req: { conds: conds.map(({ id, ...r }) => r), filters: F, fields: FIELDS, cost: 0.25 },
+    req: { conds: conds.map(({ id, ...r }) => r), filters: F, fields: FIELDS, cost: 0.25, params: { ...btParams, horizons: [1, 3, 5] } },
   });
 }
 $("#btnBt").onclick = startBacktest;
 
-function renderBacktest(R) {
+function renderBacktest() {
+  const R = lastBt, P = R.params;
   const p = (v, d = 2) => (v == null || Number.isNaN(v) ? "–" : `<span class="${cls(v)}">${v > 0 ? "+" : ""}${(v * 100).toFixed(d)}%</span>`);
-  const pc = (v) => (v == null ? "–" : (v * 100).toFixed(1) + "%");
-  const H = [[1, "다음날"], [3, "3거래일"], [5, "5거래일"]];
-  const s5 = R.stats[5] || {};
+  const pc = (v) => (v == null || Number.isNaN(v) ? "–" : (v * 100).toFixed(1) + "%");
+  const names = Object.fromEntries(SNAP.map((r) => [r.code, r.name]));
+  const s1 = R.bt1.stats[5] || R.bt1.stats[P.horizons[P.horizons.length - 1]] || {}, s2 = R.bt2.stats || {};
+  const fillRate = R.signals ? R.fills / R.signals : null;
+  const inp = (k, w = 52) => `<input type="number" inputmode="decimal" step="any" data-p="${k}" value="${btParams[k]}" style="width:${w}px">`;
+
+  // 요약 비교
+  const card = (title, s, sub) => `<div class="btcard"><div class="bt-t">${title}</div>
+    ${s.n ? `<div class="bt-big">${p(s.net)}</div><div class="bt-s">비용 차감 평균 수익 · ${nf0.format(s.n)}건</div>
+    <div class="bt-row"><span>시장 대비</span><b>${p(s.excess)}</b></div><div class="bt-row"><span>승률</span><b>${pc(s.win)}</b></div>${sub || ""}`
+    : `<div class="bt-s">체결된 거래가 없습니다</div>`}</div>`;
   let verdict;
   if (!R.signals) verdict = "이 조건에 걸린 과거 사례가 없습니다. 조건을 조금 느슨하게 해 보세요.";
+  else if (!R.fills) verdict = `신호 ${nf0.format(R.signals)}건 중 시가 −${P.dip}% 지정가가 체결된 경우가 없습니다. 지정가 폭을 줄여 보세요.`;
   else {
-    verdict = `5거래일 보유 기준, 신호 종목은 같은 기간 전체 종목 평균보다 평균 <b>${p(s5.excess)}</b> ${s5.excess >= 0 ? "높았고" : "낮았고"}, ` +
-      `시장보다 나았던 경우는 <b>${pc(s5.xwin)}</b>였습니다. 거래비용(${R.cost}%)을 빼면 평균 수익률은 <b>${p(s5.net)}</b>입니다.`;
-    if (s5.n < 100) verdict += ` <br><b>표본이 ${s5.n}건으로 적어</b> 우연의 영향이 클 수 있습니다.`;
-    else if (Math.abs(s5.excess) < 0.003) verdict += " 시장과 큰 차이가 없는 수준입니다.";
+    const better = (s1.net ?? -1e9) >= (s2.net ?? -1e9) ? "백테스트 1" : "백테스트 2";
+    verdict = `신호 ${nf0.format(R.signals)}건 중 <b>${nf0.format(R.fills)}건(${pc(fillRate)})</b>이 시가 −${P.dip}%에 체결됐습니다. ` +
+      `비용을 뺀 평균 수익은 백테스트 1(5거래일) <b>${p(s1.net)}</b>, 백테스트 2 <b>${p(s2.net)}</b>로 <b>${better}</b> 쪽이 나았습니다.`;
+    const n = Math.min(s1.n || 0, s2.n || 0);
+    if (n < 100) verdict += ` <br><b>체결 거래가 ${n}건으로 적어</b> 우연의 영향이 클 수 있습니다.`;
   }
-  const maxAbs = Math.max(0.005, ...R.monthly.map((m) => Math.abs(m.x)));
-  const names = Object.fromEntries(SNAP.map((r) => [r.code, r.name]));
+  const monthBars = (list) => {
+    if (!list.length) return "";
+    const maxAbs = Math.max(0.005, ...list.map((m) => Math.abs(m.x)));
+    return `<div class="bars">${list.map((m) => `<div class="brow"><span class="bm">${m.m.slice(2).replace("-", ".")}</span>
+      <span class="btrack"><span class="bfill ${m.x >= 0 ? "pos" : "neg"}" style="${m.x >= 0 ? "left:50%" : "right:50%"};width:${(Math.abs(m.x) / maxAbs) * 50}%"></span></span>
+      <span class="bv ${cls(m.x)}">${m.x > 0 ? "+" : ""}${(m.x * 100).toFixed(2)}%</span><span class="bn">${nf0.format(m.n)}건</span></div>`).join("")}</div>`;
+  };
+
+  // 백테스트 1 상세
+  const H = [[1, "다음날"], [3, "3거래일"], [5, "5거래일"]];
+  const d1 = `<div class="rule"><b>매수</b> 신호 다음 날 <b>시가 −${P.dip}%</b> 지정가 (저가가 닿지 않으면 거래 없음)<br>
+    <b>매도</b> 매수일 이후 1·3·5번째 거래일에 <b>그날 시가 +${P.tp1}%</b> 지정가, 닿지 않으면 그날 종가</div>
+    <div class="tbl-x"><table class="mini bt"><thead><tr><th class="l">매도일</th><th>거래 수</th><th>평균 수익</th><th>중앙값</th><th>승률</th><th>+${P.tp1}% 체결</th><th>시장 대비</th><th>비용 차감</th></tr></thead><tbody>
+    ${H.map(([h, lab]) => { const s = R.bt1.stats[h] || {}; return s.n ? `<tr><td class="l">${lab}</td><td>${nf0.format(s.n)}</td><td>${p(s.mean)}</td><td>${p(s.median)}</td><td>${pc(s.win)}</td><td>${pc(s.hit)}</td><td><b>${p(s.excess)}</b></td><td>${p(s.net)}</td></tr>` : `<tr><td class="l">${lab}</td><td colspan="7" class="muted">사례 없음</td></tr>`; }).join("")}
+    </tbody></table></div>
+    ${R.bt1.monthly.length ? `<h4>월별 시장 대비 성과 (${R.bt1.monthlyH}거래일 매도 기준)</h4>${monthBars(R.bt1.monthly)}` : ""}`;
+
+  // 백테스트 2 상세
+  const seg = (v, c) => (v > 0 ? `<span class="${c}" style="width:${v * 100}%"></span>` : "");
+  const d2 = `<div class="rule"><b>매수</b> 신호 다음 날 <b>시가 −${P.dip}%</b> 지정가 (저가가 닿지 않으면 거래 없음)<br>
+    <b>매도</b> 매수가 대비 <b>+${P.tp}% 익절</b> · <b>−${P.sl}% 손절</b> · 둘 다 아니면 매수일 이후 <b>${P.hold}번째 거래일 종가</b></div>
+    ${s2.n ? `<div class="tbl-x"><table class="mini bt"><thead><tr><th class="l"></th><th>거래 수</th><th>평균 수익</th><th>중앙값</th><th>승률</th><th>시장 대비</th><th>비용 차감</th><th>평균 보유</th></tr></thead><tbody>
+    <tr><td class="l">전체</td><td>${nf0.format(s2.n)}</td><td>${p(s2.mean)}</td><td>${p(s2.median)}</td><td>${pc(s2.win)}</td><td><b>${p(s2.excess)}</b></td><td>${p(s2.net)}</td><td>${s2.hold.toFixed(1)}일</td></tr>
+    </tbody></table></div>
+    <h4>어떻게 끝났나</h4>
+    <div class="stack">${seg(s2.tp, "s-tp")}${seg(s2.exp, "s-exp")}${seg(s2.sl, "s-sl")}</div>
+    <div class="legend3">
+      <div><span class="dot s-tp"></span>익절 <b>${pc(s2.tp)}</b> <span class="muted">평균 ${p(s2.tpAvg, 1)}</span></div>
+      <div><span class="dot s-exp"></span>기간 만료 <b>${pc(s2.exp)}</b> <span class="muted">평균 ${p(s2.expAvg, 1)}</span></div>
+      <div><span class="dot s-sl"></span>손절 <b>${pc(s2.sl)}</b> <span class="muted">평균 ${p(s2.slAvg, 1)}</span></div>
+    </div>
+    <p class="muted small">손절 평균이 −${P.sl}%보다 나쁘면 갭하락(시가부터 손절선 아래)으로 판 경우가 섞여 있다는 뜻입니다.</p>
+    ${R.bt2.monthly.length ? `<h4>월별 시장 대비 성과</h4>${monthBars(R.bt2.monthly)}` : ""}` : `<div class="note">체결된 거래가 없습니다.</div>`}`;
+
+  const why = { tp: "익절", sl: "손절", exp: "만료" };
+  const recent = R.recent.length ? `<h4>최근 신호</h4><div class="tbl-x"><table class="mini peers"><thead><tr><th class="l">신호일</th><th class="l">종목</th><th>체결</th>
+    <th>BT1 다음날</th><th>BT1 3일</th><th>BT1 5일</th><th>BT2 결과</th></tr></thead><tbody>
+    ${R.recent.slice(0, 20).map((z) => `<tr data-code="${z.code}"><td class="l">${z.date.slice(5)}</td><td class="l">${esc(names[z.code] || z.code)}</td>
+      <td>${z.filled ? "○" : '<span class="muted">미체결</span>'}</td>
+      <td>${p(z.b1[1] ?? null, 1)}</td><td>${p(z.b1[3] ?? null, 1)}</td><td>${p(z.b1[5] ?? null, 1)}</td>
+      <td>${z.b2 ? `${p(z.b2.r, 1)} <span class="muted">${why[z.b2.why]} ${z.b2.k}일</span>` : (z.filled ? '<span class="muted">진행 중</span>' : "–")}</td></tr>`).join("")}
+    </tbody></table></div>` : "";
+
   $("#btBody").innerHTML = `
+    <details class="btset"><summary>매매 규칙 바꾸기</summary>
+      <div class="btset-grid">
+        <label>매수 지정가: 다음날 시가 −${inp("dip")}%</label>
+        <label>백테스트 1 매도: 그날 시가 +${inp("tp1")}%</label>
+        <label>백테스트 2: 익절 +${inp("tp")}% · 손절 −${inp("sl")}% · 최대 ${inp("hold", 44)}거래일</label>
+      </div>
+      <div class="row gap"><button class="btn primary small" id="btRerun">이 규칙으로 다시 계산</button><button class="btn ghost small" id="btReset">처음 값으로</button></div>
+    </details>
     <div class="verdict">${verdict}</div>
     ${R.skipped.length ? `<div class="note warn">과거 기록이 없어 백테스트에서 뺀 조건: ${R.skipped.map(esc).join(", ")}</div>` : ""}
+    <div class="btcards">${card("백테스트 1 · 5거래일 매도", s1, `<div class="bt-row"><span>+${P.tp1}% 체결</span><b>${pc(s1.hit)}</b></div>`)}
+      ${card(`백테스트 2 · 익절/손절`, s2, s2.n ? `<div class="bt-row"><span>익절 / 손절</span><b>${pc(s2.tp)} / ${pc(s2.sl)}</b></div>` : "")}</div>
     <div class="note">검증 기간 ${R.period[0]} ~ ${R.period[1]} (${R.testDays}거래일) · 대상 ${nf0.format(R.universe)}종목 ·
-      신호 ${nf0.format(R.signals)}건 (신호가 있었던 날 ${R.days}일, 하루 평균 ${(R.signals / Math.max(1, R.days)).toFixed(1)}종목) · 계산 ${(R.ms / 1000).toFixed(1)}초</div>
-    <div class="tbl-x"><table class="mini bt"><thead><tr><th class="l">보유 기간</th><th>신호 수</th><th>평균 수익</th><th>중앙값</th><th>승률</th><th>시장 대비</th><th>시장 대비 승률</th><th>비용 차감</th></tr></thead><tbody>
-    ${H.map(([h, lab]) => { const s = R.stats[h] || {}; return s.n ? `<tr><td class="l">${lab}</td><td>${nf0.format(s.n)}</td><td>${p(s.mean)}</td><td>${p(s.median)}</td><td>${pc(s.win)}</td><td><b>${p(s.excess)}</b></td><td>${pc(s.xwin)}</td><td>${p(s.net)}</td></tr>` : `<tr><td class="l">${lab}</td><td colspan="7" class="muted">사례 없음</td></tr>`; }).join("")}
-    </tbody></table></div>
-    <p class="muted small">매수: 신호 다음 날 시가 · 매도: 다음날 = 그날 종가, 3·5거래일 = 3·5번째 거래일 종가 · 시장 = 같은 날 같은 방식으로 산 전체 종목 평균</p>
-    ${R.monthly.length ? `<h4>월별 5거래일 시장 대비 성과</h4><p class="muted small">막대가 매달 고르게 같은 쪽이면 꾸준한 조건, 들쭉날쭉하면 특정 시기 운에 가깝습니다.</p>
-    <div class="bars">${R.monthly.map((m) => `<div class="brow"><span class="bm">${m.m.slice(2).replace("-", ".")}</span>
-      <span class="btrack"><span class="bfill ${m.x >= 0 ? "pos" : "neg"}" style="${m.x >= 0 ? "left:50%" : `right:50%`};width:${(Math.abs(m.x) / maxAbs) * 50}%"></span></span>
-      <span class="bv ${cls(m.x)}">${m.x > 0 ? "+" : ""}${(m.x * 100).toFixed(2)}%</span><span class="bn">${nf0.format(m.n)}건</span></div>`).join("")}</div>` : ""}
-    ${R.recent.length ? `<h4>최근 신호</h4><div class="tbl-x"><table class="mini peers"><thead><tr><th class="l">신호일</th><th class="l">종목</th><th>다음날</th><th>3일</th><th>5일</th></tr></thead><tbody>
-    ${R.recent.slice(0, 20).map((z) => `<tr data-code="${z.code}"><td class="l">${z.date.slice(5)}</td><td class="l">${esc(names[z.code] || z.code)}</td><td>${p(z.fwd[1] ?? null, 1)}</td><td>${p(z.fwd[3] ?? null, 1)}</td><td>${p(z.fwd[5] ?? null, 1)}</td></tr>`).join("")}
-    </tbody></table></div>` : ""}
+      신호 ${nf0.format(R.signals)}건 · 지정가 체결 ${nf0.format(R.fills)}건 (${pc(fillRate)}) · 계산 ${(R.ms / 1000).toFixed(1)}초<br>
+      시장 대비 = 같은 매수일 시가에 전체 종목을 사서 같은 매도일 종가에 팔았을 때 평균과의 차이</div>
+    <div class="seg bt-tabs" id="btTabs"><button data-t="1" class="${btTab === "1" ? "on" : ""}">백테스트 1 · 지정가 단기</button><button data-t="2" class="${btTab === "2" ? "on" : ""}">백테스트 2 · 익절/손절</button></div>
+    <div id="btDetail">${btTab === "1" ? d1 : d2}</div>
+    ${recent}
     <h4>꼭 알아 둘 점</h4>
     <ul class="caveats">
-      <li>현재 상장된 종목만 들어 있습니다. 그동안 상장폐지된 종목이 빠져 있어 결과가 실제보다 <b>좋게</b> 나올 수 있습니다.</li>
-      <li>약 1년의 짧은 기간입니다. 상승장·하락장 한쪽에만 맞는 조건일 수 있습니다.</li>
-      <li>시가총액과 업종 분류는 지금 기준을 과거에도 그대로 썼습니다. 상한가 등으로 실제로는 못 샀을 경우도 산 것으로 계산합니다.</li>
-      <li>비용 ${R.cost}%는 매도 시 증권거래세 0.20%와 수수료를 대략 더한 값입니다.</li>
-      <li>조건을 여러 번 바꿔 가며 가장 좋은 결과를 고르면, 과거에만 맞춘 조건(과최적화)이 되기 쉽습니다.</li>
+      <li>지정가는 그날 저가(또는 고가)가 그 가격에 <b>닿기만 하면 체결</b>된 것으로 봅니다. 실제로는 딱 닿은 경우 체결되지 않을 수도 있습니다.</li>
+      <li>하루 안에서 고가와 저가 중 무엇이 먼저였는지는 일봉으로 알 수 없어서, 익절과 손절이 같은 날 모두 가능하면 <b>손절</b>로 계산합니다. 매수 당일은 손절만 확인합니다.</li>
+      <li>시가부터 손절선 아래(갭하락)나 익절선 위(갭상승)로 시작하면 시가에 판 것으로 계산합니다.</li>
+      <li>현재 상장된 종목만 들어 있어 결과가 실제보다 좋게 나올 수 있고, 기간이 약 1년으로 짧습니다.</li>
+      <li>비용 ${R.cost}%(매도 거래세 0.20% + 수수료)를 '비용 차감'에 반영했습니다. 호가 단위와 체결 수량 한계는 무시했습니다.</li>
+      <li>규칙과 조건을 여러 번 바꿔 가장 좋은 결과만 고르면 과거에만 맞춘 전략(과최적화)이 되기 쉽습니다.</li>
     </ul>`;
+  $("#btTabs").onclick = (e) => { const b = e.target.closest("button"); if (!b) return; btTab = b.dataset.t; renderBacktest(); };
+  $("#btRerun").onclick = () => {
+    document.querySelectorAll("#btBody input[data-p]").forEach((i) => { const v = Number(i.value); if (!Number.isNaN(v) && v > 0) btParams[i.dataset.p] = v; });
+    btParams.hold = Math.max(1, Math.min(10, Math.round(btParams.hold)));
+    try { localStorage.setItem(LS_BT, JSON.stringify(btParams)); } catch (e) {}
+    startBacktest();
+  };
+  $("#btReset").onclick = () => { btParams = { ...BT_DEFAULT }; try { localStorage.removeItem(LS_BT); } catch (e) {} startBacktest(); };
 }
 $("#btBody").addEventListener("click", (e) => { const tr = e.target.closest("tr[data-code]"); if (tr) { closeBt(); view = "chart"; openChart(tr.dataset.code); } });
 

@@ -158,6 +158,25 @@ table.peers tr.me td{background:var(--accent-soft);font-weight:700}
 .bv{text-align:right} .bn{text-align:right;color:var(--muted)}
 .caveats{margin:0;padding-left:18px;font-size:12.5px;color:var(--ink2);line-height:1.7}
 
+.btcards{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0}
+.btcard{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:#fff}
+.bt-t{font-size:12.5px;font-weight:700;color:var(--ink2)}
+.bt-big{font-size:24px;font-weight:800;margin-top:4px;font-variant-numeric:tabular-nums}
+.bt-s{font-size:11.5px;color:var(--muted);margin-bottom:6px}
+.bt-row{display:flex;justify-content:space-between;font-size:13px;padding:3px 0;border-top:1px solid #f3f4f6}
+.bt-tabs{margin:14px 0 4px;width:100%}
+.bt-tabs button{flex:1;padding:9px 6px;font-size:13px;font-weight:700}
+.rule{font-size:12.5px;color:var(--ink2);line-height:1.7;background:#fafbfc;border:1px dashed var(--line);border-radius:8px;padding:8px 11px;margin:10px 0}
+.btset{border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin-bottom:12px;background:#fff}
+.btset summary{cursor:pointer;font-weight:700;font-size:13px;color:var(--ink2)}
+.btset-grid{display:flex;flex-direction:column;gap:8px;margin:10px 0;font-size:13px}
+.btset input{padding:5px 6px;margin:0 2px}
+.stack{display:flex;height:14px;border-radius:7px;overflow:hidden;background:#eef0f4}
+.stack span{display:block;height:100%}
+.s-tp{background:var(--up)} .s-sl{background:var(--down)} .s-exp{background:#cbd5e1}
+.legend3{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;margin-top:8px}
+.dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+
 /* ---------- 아이폰 · 아이패드 세로 ---------- */
 @media (max-width:900px){
   :root{--top:52px}
@@ -186,6 +205,9 @@ table.peers tr.me td{background:var(--accent-soft);font-weight:700}
   .m-title{font-size:16px}
   .m-sub{font-size:12px}
   .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .btcards{grid-template-columns:1fr 1fr;gap:8px}
+  .bt-big{font-size:20px}
+  .btset input{font-size:16px}
   .pane{padding:12px 12px 24px}
   .m-ctrl{gap:6px}
 }
