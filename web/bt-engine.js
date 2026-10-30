@@ -166,7 +166,49 @@
     F.hi52_gap = c.map((x, i) => (x / hi52[i] - 1) * 100);
     F.lo52_gap = c.map((x, i) => (x / lo52[i] - 1) * 100);
     for (const p of SECTOR_PERIODS) F[`ret${p}`] = c.map((x, i) => (i >= p && c[i - p] ? (x / c[i - p] - 1) * 100 : NaN_));
+    // 캔들 패턴: 마지막 발생 후 경과일 (0 = 그날, 99 = 최근 20일 안에 없음)
+    const P = patterns(c, o, h, l);
+    for (const k of PATTERNS) {
+      const r = arr(n); let prev = PAT_NONE;
+      for (let i = 0; i < n; i++) { let v = P[k][i] ? 0 : prev + 1; if (v > PAT_LOOKBACK - 1) v = PAT_NONE; r[i] = v; prev = v; }
+      F[k] = r;
+    }
+    F.up_streak = arr(n); F.dn_streak = arr(n);
+    for (let i = 0; i < n; i++) {
+      F.up_streak[i] = c[i] > o[i] ? (i ? F.up_streak[i - 1] : 0) + 1 : 0;
+      F.dn_streak[i] = c[i] < o[i] ? (i ? F.dn_streak[i - 1] : 0) + 1 : 0;
+    }
     return F;
+  }
+
+  const PATTERNS = ["pat_hammer", "pat_invhammer", "pat_doji", "pat_bigup", "pat_bigdn", "pat_engulf_up", "pat_engulf_dn",
+    "pat_harami_up", "pat_harami_dn", "pat_mstar", "pat_estar", "pat_gapup", "pat_gapdn"];
+  const PAT_LOOKBACK = 20, PAT_NONE = 99;
+  function patterns(c, o, h, l) { // indicators.py candle_patterns()와 같은 정의
+    const n = c.length, P = {};
+    PATTERNS.forEach((k) => (P[k] = new Uint8Array(n)));
+    const g = (a, i) => (i >= 0 ? a[i] : NaN_);
+    for (let i = 0; i < n; i++) {
+      const O = o[i], Hh = h[i], L = l[i], C = c[i], R = Hh - L, body = Math.abs(C - O);
+      const up = Hh - Math.max(O, C), lo = Math.min(O, C) - L, valid = R > 0;
+      const o1 = g(o, i - 1), h1 = g(h, i - 1), l1 = g(l, i - 1), c1 = g(c, i - 1);
+      const body1 = Math.abs(c1 - o1), R1 = h1 - l1;
+      const o2 = g(o, i - 2), c2 = g(c, i - 2), body2 = Math.abs(c2 - o2), R2 = g(h, i - 2) - g(l, i - 2), mid2 = (o2 + c2) / 2;
+      P.pat_hammer[i] = valid && lo >= 2 * body && lo >= 0.6 * R && up <= 0.15 * R;
+      P.pat_invhammer[i] = valid && up >= 2 * body && up >= 0.6 * R && lo <= 0.15 * R;
+      P.pat_doji[i] = valid && body <= 0.1 * R;
+      P.pat_bigup[i] = valid && C > O && body >= 0.7 * R && (C - O) / O >= 0.05;
+      P.pat_bigdn[i] = valid && C < O && body >= 0.7 * R && (O - C) / O >= 0.05;
+      P.pat_engulf_up[i] = c1 < o1 && C > O && O <= c1 && C >= o1 && body > body1;
+      P.pat_engulf_dn[i] = c1 > o1 && C < O && O >= c1 && C <= o1 && body > body1;
+      P.pat_harami_up[i] = c1 < o1 && body1 >= 0.6 * R1 && C > O && Math.max(O, C) <= o1 && Math.min(O, C) >= c1 && body <= 0.5 * body1;
+      P.pat_harami_dn[i] = c1 > o1 && body1 >= 0.6 * R1 && C < O && Math.max(O, C) <= c1 && Math.min(O, C) >= o1 && body <= 0.5 * body1;
+      P.pat_mstar[i] = c2 < o2 && body2 >= 0.6 * R2 && body1 <= 0.3 * body2 && (o1 + c1) / 2 < c2 && C > O && C >= mid2;
+      P.pat_estar[i] = c2 > o2 && body2 >= 0.6 * R2 && body1 <= 0.3 * body2 && (o1 + c1) / 2 > c2 && C < O && C <= mid2;
+      P.pat_gapup[i] = L > h1;
+      P.pat_gapdn[i] = Hh < l1;
+    }
+    return P;
   }
 
   function paramField(key, c, n) {
@@ -180,6 +222,23 @@
     return r;
   }
 
+  const FLOW_IDX = { ind: 0, frg: 1, inst: 2 };
+  function flowField(key, K, n) { // flow_{ind|frg|inst}_{ratio|days}_n
+    const m = /^flow_(ind|frg|inst)_(ratio|days)_n$/.exec(key), L = K.c.length, r = arr(L);
+    if (!m || !K.fl) return r;
+    const q = K.fl[FLOW_IDX[m[1]]];
+    for (let i = n - 1; i < L; i++) {
+      let net = 0, amt = 0, pos = 0, ok = true;
+      for (let k = i - n + 1; k <= i; k++) {
+        if (isn(q[k])) { ok = false; break; }
+        net += q[k] * K.c[k]; amt += K.c[k] * K.v[k]; if (q[k] > 0) pos++;
+      }
+      if (!ok) continue;
+      r[i] = m[2] === "days" ? pos : amt > 0 ? (net / amt) * 100 : NaN_;
+    }
+    return r;
+  }
+
   /* ---------- 과거 데이터 파일 풀기 ---------- */
   function unshuffle(u8) {
     const n = u8.length / 4, out = new Uint8Array(u8.length);
@@ -187,8 +246,12 @@
     return new Int32Array(out.buffer);
   }
   function stockSeries(H, s) { // 정렬된 날짜 기준 (거래 없는 날 NaN)
-    const D = H.D, I = H.I, b = s * 5 * D;
+    const D = H.D, I = H.I, B = H.meta.flow ? 8 : 5, b = s * B * D;
     const C = arr(D), O = arr(D), Hh = arr(D), L = arr(D), V = arr(D);
+    const FL = H.meta.flow ? [arr(D), arr(D), arr(D)] : null;   // 개인·외국인·기관 순매수(주)
+    if (FL) for (let k = 0; k < 3; k++) for (let t = 0; t < D; t++) {
+      const q = I[b + (5 + k) * D + t]; if (q !== -2147483648) FL[k][t] = q;
+    }
     let c = 0;
     for (let t = 0; t < D; t++) {
       c += I[b + t];
@@ -196,13 +259,13 @@
       if (vol === -1) continue;
       C[t] = c; O[t] = c + I[b + D + t]; Hh[t] = c + I[b + 2 * D + t]; L[t] = c + I[b + 3 * D + t]; V[t] = vol;
     }
-    return { C, O, H: Hh, L, V };
+    return { C, O, H: Hh, L, V, FL };
   }
   function compact(S) {
     const idx = [];
     for (let t = 0; t < S.C.length; t++) if (!isn(S.C[t])) idx.push(t);
     const pick = (a) => Float64Array.from(idx, (t) => a[t]);
-    return { idx, c: pick(S.C), o: pick(S.O), h: pick(S.H), l: pick(S.L), v: pick(S.V) };
+    return { idx, c: pick(S.C), o: pick(S.O), h: pick(S.H), l: pick(S.L), v: pick(S.V), fl: S.FL ? S.FL.map(pick) : null };
   }
 
   /* ---------- 백테스트 ---------- */
@@ -261,6 +324,10 @@
     const f = fmap[c.field]; if (!f || f.bt === false) return null;
     const v1 = Number(c.value), v2 = Number(c.value2);
     if (c.value === null || c.value === undefined || isn(v1)) return null;
+    if (f.type === "pattern") { // 최근 N일 안에 나타남(1) / 나타나지 않음(0)
+      const nn = Math.max(1, Math.min(PAT_LOOKBACK, Math.round(c.param || 1)));
+      return v1 === 1 ? (x) => x <= nn - 1 : (x) => x > nn - 1;
+    }
     if (f.type !== "num" || c.op === "is") return (x) => x === v1;
     switch (c.op) {
       case ">": return (x) => x > v1;
@@ -324,6 +391,7 @@
       const fields = computeFields(K.c, K.o, K.h, K.l, K.v);
       const getArr = (c) => {
         const key = c.field, f = c.f;
+        if (key.startsWith("flow_")) return flowField(key, K, Math.max(1, Math.min(f.pmax || 20, Math.round(c.param || f.pdef || 5))));
         if (f.param) { const n = Math.max(1, Math.min(120, Math.round(c.param || 20))); return paramField(key, K.c, n); }
         if (key === "marcap") return arr(K.c.length, H.meta.marcap[s] ?? NaN_);
         const m = /^(rel|sec_ret)(\d+)$/.exec(key);
@@ -400,5 +468,5 @@
     };
   }
 
-  G.BT = { computeFields, paramField, unshuffle, stockSeries, compact, prepare, run, sectorRel };
+  G.BT = { flowField, patterns, computeFields, paramField, unshuffle, stockSeries, compact, prepare, run, sectorRel };
 })(typeof self !== "undefined" ? self : globalThis);

@@ -3,7 +3,7 @@ const $ = (s) => document.querySelector(s);
 const LS_CUR = "kscr_current_v1", LS_SAVED = "kscr_saved_v1";
 const isMobile = () => window.matchMedia("(max-width:900px)").matches;
 
-let FIELDS = [], FMAP = {}, SNAP = [], META = {}, CLOSES = null, VER = "";
+let FIELDS = [], FMAP = {}, SNAP = [], META = {}, CLOSES = null, FLOWS = null, VER = "";
 let conds = [], lastResult = null, sortKey = "amount", sortAsc = false;
 let chartCode = null, chartDays = 120, overlay = "ma", uid = 1;
 
@@ -20,6 +20,12 @@ const PRESETS = [
   { name: "20일 종가 신고가", c: [["hi_n", ">", 0, null, 20]] },
   { name: "최근 20일 20% 이상 상승", c: [["ret_n", ">=", 20, null, 20]] },
   { name: "최근 5일 10% 이상 하락", c: [["ret_n", "<=", -10, null, 5]] },
+  { name: "아랫꼬리 망치형 (직전일)", c: [["pat_hammer", "is", 1, null, 1]] },
+  { name: "상승장악형 (최근 3일)", c: [["pat_engulf_up", "is", 1, null, 3]] },
+  { name: "십자형 제외 (직전일)", c: [["pat_doji", "is", 0, null, 1]] },
+  { name: "외국인·기관 5일 동반 순매수", c: [["flow_frg_ratio_n", ">", 0, null, 5], ["flow_inst_ratio_n", ">", 0, null, 5]] },
+  { name: "개인 매도 · 기관 매수 (5일)", c: [["flow_ind_ratio_n", "<", 0, null, 5], ["flow_inst_ratio_n", ">", 0, null, 5]] },
+  { name: "외국인 5일 중 4일 이상 순매수", c: [["flow_frg_days_n", ">=", 4, null, 5]] },
 ];
 const OPS = [[">", "보다 큼"], [">=", "이상"], ["<", "보다 작음"], ["<=", "이하"], ["between", "사이"]];
 
@@ -38,6 +44,7 @@ const nf2 = new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 2, minimumFr
 function fmt(v, unit, type, options) {
   if (v === null || v === undefined || Number.isNaN(v)) return "–";
   if (type === "bool") return v ? "예" : "아니오";
+  if (type === "pattern") return v >= 99 ? "–" : v === 0 ? "직전일" : `${v}일 전`;
   if (type === "enum") { const o = (options || []).find((o) => o.v === v); return o ? o.t : v; }
   if (unit === "%" || unit === "%p") return (v > 0 ? "+" : "") + nf2.format(v);
   if (["억원", "원", "주", "일", "건"].includes(unit)) return nf0.format(v);
@@ -87,7 +94,27 @@ async function ensureCloses() {
   CLOSES = {}; j.codes.forEach((c, i) => (CLOSES[c] = j.data[i]));
   return CLOSES;
 }
+async function ensureFlows() {
+  if (FLOWS) return FLOWS;
+  FLOWS = { dates: [], by: {} };
+  try {
+    const j = await getJSON("data/flows.json");
+    FLOWS.dates = j.dates;
+    j.codes.forEach((c, i) => (FLOWS.by[c] = { ind: j.ind[i], frg: j.frg[i], inst: j.inst[i], amt: j.amt[i] }));
+  } catch (e) { /* 아직 수급 데이터 없음 */ }
+  return FLOWS;
+}
+function flowValue(kind, code, n) { // flow_{ind|frg|inst}_{ratio|days}_n
+  const m = /^flow_(ind|frg|inst)_(ratio|days)_n$/.exec(kind), d = FLOWS && FLOWS.by[code];
+  if (!m || !d) return null;
+  const a = d[m[1]].slice(-n), amt = d.amt.slice(-n);
+  if (a.length < n || a.some((x) => x == null) || amt.some((x) => x == null)) return null;
+  if (m[2] === "days") return a.filter((x) => x > 0).length;
+  const s = amt.reduce((x, y) => x + y, 0);
+  return s > 0 ? (a.reduce((x, y) => x + y, 0) / s) * 100 : null;
+}
 function paramValue(kind, code, n) {
+  if (kind.startsWith("flow_")) return flowValue(kind, code, n);
   const a = CLOSES[code]; if (!a || a.length <= n) return null;
   const last = a[a.length - 1]; if (last == null) return null;
   if (kind === "ret_n") { const p = a[a.length - 1 - n]; return p ? (last / p - 1) * 100 : null; }
@@ -107,11 +134,13 @@ function fieldSelect(sel) {
   }
   return `<select class="f" aria-label="지표">${h}</optgroup></select>`;
 }
+const defParam = (f) => (f.type === "pattern" ? 1 : f.param ? f.pdef || 20 : null);
+const maxParam = (f) => (f.type === "pattern" ? 20 : f.pmax || 120);
 function newCond(field, op, value, value2, param) {
   const f = FMAP[field] || FIELDS[0];
   return { id: uid++, field: f.key, op: op || (f.type === "num" ? ">" : "is"),
     value: value ?? (f.type === "num" ? 0 : f.type === "enum" ? f.options[0].v : 1),
-    value2: value2 ?? null, param: param ?? (f.param ? 20 : null) };
+    value2: value2 ?? null, param: param ?? defParam(f) };
 }
 function renderConds() {
   const box = $("#conds");
@@ -121,8 +150,12 @@ function renderConds() {
   }
   box.innerHTML = conds.map((c) => {
     const f = FMAP[c.field]; let bot = "";
-    if (f.param) bot += `최근 <input type="number" inputmode="numeric" class="n" data-k="param" value="${c.param}" min="1" max="120">일,&nbsp;`;
-    if (f.type === "bool") {
+    if (f.param) bot += `최근 <input type="number" inputmode="numeric" class="n" data-k="param" value="${c.param}" min="1" max="${maxParam(f)}">일,&nbsp;`;
+    if (f.type === "pattern") {
+      bot += `최근 <input type="number" inputmode="numeric" class="n" data-k="param" value="${c.param ?? 1}" min="1" max="20">일 안에
+        <select data-k="value"><option value="1" ${c.value == 1 ? "selected" : ""}>나타남 (선택)</option><option value="0" ${c.value == 0 ? "selected" : ""}>나타나지 않음 (제외)</option></select>
+        <span class="unit">1 = 직전 거래일만</span>`;
+    } else if (f.type === "bool") {
       bot += `<select data-k="value"><option value="1" ${c.value == 1 ? "selected" : ""}>예 (해당함)</option><option value="0" ${c.value == 0 ? "selected" : ""}>아니오</option></select>`;
     } else if (f.type === "enum") {
       bot += `<select data-k="value">${f.options.map((o) => `<option value="${o.v}" ${c.value == o.v ? "selected" : ""}>${esc(o.t)}</option>`).join("")}</select>`;
@@ -159,7 +192,8 @@ function renderPresets() {
   $("#presets").onclick = (e) => {
     const i = e.target.dataset.i; if (i === undefined) return;
     for (const [f, op, v, v2, n] of PRESETS[i].c) {
-      const want = n ?? (FMAP[f].param ? 20 : null);
+      if (!FMAP[f]) continue;
+      const want = n ?? defParam(FMAP[f]);
       const ex = conds.find((c) => c.field === f && (c.param ?? null) === want);
       if (ex) Object.assign(ex, { op, value: v, value2: v2 ?? null });
       else conds.push(newCond(f, op, v, v2, n));
@@ -217,8 +251,9 @@ async function run(switchTab = true) {
   const btn = $("#btnRun"); btn.disabled = true; btn.textContent = "찾는 중…";
   try {
     const F = filters();
-    const needParam = conds.some((c) => FMAP[c.field]?.param);
+    const needParam = conds.some((c) => FMAP[c.field]?.param && !c.field.startsWith("flow_"));
     if (needParam) await ensureCloses();
+    if (conds.some((c) => c.field.startsWith("flow_"))) await ensureFlows();
     let rows = SNAP.filter((r) => F.markets.includes(r.market) && r.volume > 0 &&
       (!F.exclude_pref || r.code.endsWith("0")) && (!F.exclude_spac || !r.name.includes("스팩")) &&
       (r.amount ?? 0) >= F.min_amount && r.close >= F.min_price);
@@ -227,14 +262,18 @@ async function run(switchTab = true) {
       const f = FMAP[c.field]; if (!f) continue;
       let key = c.field, label = f.label;
       if (f.param) {
-        const n = Math.max(1, Math.min(120, Math.round(c.param || 20)));
-        key = c.field.replace("_n", "_" + n); label = f.label.replace("N일", n + "일");
+        const n = Math.max(1, Math.min(maxParam(f), Math.round(c.param || defParam(f))));
+        key = `${c.field}@${n}`; label = f.label.replace("N일", n + "일");
         rows = rows.map((r) => (key in r ? r : { ...r, [key]: paramValue(c.field, r.code, n) }));
       }
       const v1 = Number(c.value), v2 = Number(c.value2);
       if (c.value === null || Number.isNaN(v1)) continue;
       let test;
-      if (f.type !== "num" || c.op === "is") test = (x) => x === v1;
+      if (f.type === "pattern") {
+        const n = Math.max(1, Math.min(20, Math.round(c.param || 1)));
+        test = v1 === 1 ? (x) => x <= n - 1 : (x) => x > n - 1;
+        label = `${f.label} (최근 ${n}일 ${v1 === 1 ? "나타남" : "제외"})`;
+      } else if (f.type !== "num" || c.op === "is") test = (x) => x === v1;
       else if (c.op === ">") test = (x) => x > v1;
       else if (c.op === ">=") test = (x) => x >= v1;
       else if (c.op === "<") test = (x) => x < v1;
@@ -358,6 +397,7 @@ async function openChart(code) {
   showView(view);
   if (view === "news") return renderNews(code, inf);
   if (view === "sec") return renderSector(code, inf);
+  if (view === "flow") return renderFlow(code, inf);
   let j;
   try { j = await getJSON(`data/c/${code}.json`); } catch (e) { toast("차트 데이터를 불러오지 못했습니다.", true); return; }
   // 미완성 오늘 봉은 빌드에서 이미 제외된 기준일까지만 표시
@@ -372,6 +412,7 @@ function showView(v) {
   $("#chartCtrl").classList.toggle("hidden", v !== "chart");
   $("#newsPane").classList.toggle("hidden", v !== "news");
   $("#secPane").classList.toggle("hidden", v !== "sec");
+  $("#flowPane").classList.toggle("hidden", v !== "flow");
 }
 $("#view").onclick = (e) => { const b = e.target.closest("button"); if (b) { view = b.dataset.v; openChart(chartCode); } };
 
@@ -410,6 +451,36 @@ async function renderNews(code, inf) {
   html += list(dom, `국내 기사 (최근 ${dom.length}건)`) + list(glob, "해외(영문) 기사");
   if (!dom.length && !glob.length) html += `<div class="note">최근 7일 동안 수집된 기사가 없습니다.</div>`;
   P.innerHTML = html;
+}
+
+/* ---------------- 수급 탭 ---------------- */
+async function renderFlow(code, inf) {
+  const P = $("#flowPane");
+  P.innerHTML = `<p class="muted">불러오는 중…</p>`;
+  await ensureFlows();
+  if (chartCode !== code || view !== "flow") return;
+  const d = FLOWS.by[code], M = META.flows || {};
+  const naver = `https://finance.naver.com/item/frgn.naver?code=${code}`;
+  const link = `<a class="btn ghost small" href="${naver}" target="_blank" rel="noopener">네이버 증권 투자자별 매매동향 ↗</a>`;
+  if (!d) { P.innerHTML = `<div class="note">이 종목의 수급 데이터가 아직 없습니다 (거래대금 1억원 이상 종목만 모읍니다).</div>${link}`; return; }
+  const won = (v) => (v == null ? "–" : `<span class="${cls(v)}">${v > 0 ? "+" : ""}${nf2.format(v)}</span>`);
+  const sum = (k, n) => { const v = flowValue(`flow_${k}_ratio_n`, code, n), dd = flowValue(`flow_${k}_days_n`, code, n);
+    return `<td>${v == null ? "–" : `<span class="${cls(v)}">${v > 0 ? "+" : ""}${nf2.format(v)}%</span>`}</td><td>${dd == null ? "–" : dd + "/" + n + "일"}</td>`; };
+  const rows = FLOWS.dates.map((dt, i) => ({ dt, ind: d.ind[i], frg: d.frg[i], inst: d.inst[i], amt: d.amt[i] })).filter((r) => r.amt != null).reverse();
+  const left = Math.max(0, (M.bt_days || 60) - (M.days || 0));
+  P.innerHTML = `
+    <div class="note">순매수 비중 = 기간 순매수 금액 ÷ 같은 기간 거래대금. 금액은 수량 × 그날 종가로 계산한 근사치입니다.
+      ${rows.length && rows[0].dt < META.base_date ? `<br><b>수급 기준일 ${rows[0].dt}</b> (주가 기준일보다 하루 늦게 반영될 수 있음)` : ""}</div>
+    <div class="tbl-x"><table class="mini"><thead><tr><th class="l">기간</th><th>개인 비중</th><th>개인 매수일</th><th>외국인 비중</th><th>외국인 매수일</th><th>기관 비중</th><th>기관 매수일</th></tr></thead><tbody>
+    ${[1, 3, 5, 10, 20].filter((n) => n <= FLOWS.dates.length).map((n) => `<tr><td class="l">최근 ${n}일</td>${sum("ind", n)}${sum("frg", n)}${sum("inst", n)}</tr>`).join("")}
+    </tbody></table></div>
+    <h4>일별 순매수 (억원)</h4>
+    <div class="tbl-x"><table class="mini"><thead><tr><th class="l">날짜</th><th>개인</th><th>외국인</th><th>기관</th><th>거래대금</th></tr></thead><tbody>
+    ${rows.map((r) => `<tr><td class="l">${r.dt.slice(5)}</td><td>${won(r.ind)}</td><td>${won(r.frg)}</td><td>${won(r.inst)}</td><td>${nf0.format(r.amt)}</td></tr>`).join("")}
+    </tbody></table></div>
+    <p class="muted small">수급 데이터 누적 ${M.days || 0}거래일 · ${left ? `${left}거래일 더 쌓이면 수급 조건도 백테스트에 자동 포함됩니다.` : "백테스트에 포함되고 있습니다."}
+    ${M.status === "blocked" || M.status === "no-endpoint" ? " · <b>최근 수집 실패 — 이전 데이터 표시 중</b>" : ""}</p>
+    ${link}`;
 }
 
 /* ---------------- 업종 탭 ---------------- */
@@ -505,6 +576,7 @@ $("#btModal").onclick = (e) => { if (e.target.id === "btModal") closeBt(); };
 function condText(c) {
   const f = FMAP[c.field]; if (!f) return "";
   let lab = f.param ? f.label.replace("N일", (c.param || 20) + "일") : f.label;
+  if (f.type === "pattern") return `${lab}: 최근 ${c.param || 1}일 안에 ${c.value == 1 ? "나타남" : "없음"}`;
   if (f.type === "bool") return `${lab}: ${c.value == 1 ? "예" : "아니오"}`;
   if (f.type === "enum") return `${lab}: ${(f.options.find((o) => o.v == c.value) || {}).t}`;
   const op = { ">": ">", ">=": "≥", "<": "<", "<=": "≤" }[c.op];

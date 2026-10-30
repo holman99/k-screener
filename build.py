@@ -36,6 +36,8 @@ CLOSE_ROWS = 121         # '최근 N일' 조건용 종가 (N 최대 120)
 WORKERS = 8
 MARKET_CLOSE = (15, 40)
 HIST_MIN_AMOUNT = 1.0    # 백테스트 대상: 최근 60일 거래대금 중앙값 1억원 이상
+FLOW_ROWS = 20           # 화면용 수급 기간(최근 N일, 최대 20)
+FLOW_BT_DAYS = 60        # 수급이 이만큼 쌓이면 백테스트에 포함
 
 
 def now_kst():
@@ -201,6 +203,19 @@ def collect_demo():
     return pd.DataFrame(recs), prices, []
 
 
+def demo_flows(codes, used, base_date):
+    rng = np.random.default_rng(5)
+    out = {}
+    for c in codes:
+        df = used[c].tail(15)
+        vol = df["Volume"].values
+        frg = (rng.normal(0, 0.08, len(df)) * vol).round()
+        inst = (rng.normal(0, 0.06, len(df)) * vol).round()
+        out[c] = pd.DataFrame({"ind": -(frg + inst), "frg": frg, "inst": inst, "est": 0},
+                              index=[d.strftime("%Y-%m-%d") for d in df.index])
+    return out, {"status": "demo"}
+
+
 def demo_news(codes):
     rng = np.random.default_rng(3)
     now = now_kst()
@@ -247,7 +262,7 @@ def write_json(path, obj):
         json.dump(obj, f, ensure_ascii=False, separators=(",", ":"))
 
 
-def write_hist(path_bin, path_meta, used, snap, version):
+def write_hist(path_bin, path_meta, used, snap, version, flows=None):
     """백테스트용 과거 주가를 한 파일로 압축합니다 (브라우저가 받아서 직접 계산)."""
     keep = []
     for c in snap["code"]:
@@ -268,6 +283,16 @@ def write_hist(path_bin, path_meta, used, snap, version):
             return np.where(valid, (df[col].fillna(0).round().astype(np.int64).values - cf), 0)
         v = np.where(valid, np.clip(df["Volume"].fillna(0).round(), 0, 2**31 - 1), -1).astype(np.int64)
         blocks += [cd, rel("Open"), rel("High"), rel("Low"), v]
+        if flows is not None:
+            fl = flows.get(c)
+            for k in ("ind", "frg", "inst"):
+                if fl is None:
+                    blocks.append(np.full(D, -2**31, dtype=np.int64))
+                else:
+                    q = fl[k].copy()
+                    q.index = pd.to_datetime(q.index)
+                    q = q.reindex(idx)
+                    blocks.append(np.where(q.notna(), np.clip(q.fillna(0).round(), -2**31 + 1, 2**31 - 1), -2**31).astype(np.int64))
     arr = np.concatenate(blocks).astype("<i4")
     shuffled = arr.view(np.uint8).reshape(-1, 4).T.copy().tobytes()   # 바이트 순서 재배열 → 압축률 향상
     with open(path_bin, "wb") as f:
@@ -279,6 +304,7 @@ def write_hist(path_bin, path_meta, used, snap, version):
         "sector": [num(rows.at[c, "sector"]) if "sector" in rows else None for c in keep],
         "marcap": [num(rows.at[c, "marcap"]) for c in keep],
         "spac": [1 if "스팩" in str(rows.at[c, "name"]) else 0 for c in keep],
+        "flow": flows is not None,
     })
     return len(keep), D, os.path.getsize(path_bin)
 
@@ -359,6 +385,36 @@ def build(listing, prices, errors, mode):
     for k in ["news48", "news7d", "news_cap", "news_ratio", "gnews48", "gnews7d"]:
         snap[k] = snap["code"].map(lambda c: cnt.get(c, {}).get(k, np.nan))
 
+    # ---- 수급 (개인·외국인·기관)
+    if mode == "demo":
+        flows, fstatus = demo_flows(codes, used, base_date)
+    else:
+        import flows as flowmod
+        try:
+            flows, fstatus = flowmod.collect(snap, CACHE, base_date)
+        except Exception as e:
+            log("수급 수집 전체 실패:", e)
+            flows, fstatus = {}, {"status": "error", "message": str(e)[:200]}
+    fdates = sorted(set().union(*[set(df.index) for df in flows.values()])) if flows else []
+    flow_days = len(fdates)
+    fd = fdates[-FLOW_ROWS:]
+    if flows:
+        fj = {"dates": fd, "codes": [], "ind": [], "frg": [], "inst": [], "amt": []}
+        for c in codes:
+            df = flows.get(c)
+            if df is None:
+                continue
+            px = used[c].copy()
+            px.index = px.index.strftime("%Y-%m-%d")
+            px = px.reindex(fd)
+            sub = df.reindex(fd)
+            fj["codes"].append(c)
+            for k in ("ind", "frg", "inst"):
+                fj[k].append([num(v, 6) for v in (sub[k] * px["Close"] / 1e8)])
+            fj["amt"].append([num(v, 6) for v in (px["Close"] * px["Volume"] / 1e8)])
+        write_json(os.path.join(data_dir, "flows.json"), fj)
+    log(f"수급: 종목 {len(flows)}개, 누적 {flow_days}거래일 (마지막 {fdates[-1] if fdates else '-'})")
+
     # ---- 스냅샷
     cols = ["code", "name", "market"] + [c for c in snap.columns if c not in ("code", "name", "market", "date")]
     write_json(os.path.join(data_dir, "snapshot.json"), {
@@ -383,10 +439,16 @@ def build(listing, prices, errors, mode):
     # ---- 백테스트용 과거 데이터
     hv = base_date.replace("-", "") + now_kst().strftime("%H")
     hn, hd, hsize = write_hist(os.path.join(data_dir, "hist.bin.gz"), os.path.join(data_dir, "hist.json"),
-                               used, snap, hv)
+                               used, snap, hv, flows if flows else None)
     log(f"백테스트 데이터: {hn}종목 × {hd}일, {hsize / 1e6:.1f}MB")
 
-    write_json(os.path.join(data_dir, "fields.json"), ind.FIELDS)
+    fields = [dict(f) for f in ind.FIELDS]
+    for f in fields:
+        if f["key"].startswith("flow_"):
+            f["bt"] = flow_days >= FLOW_BT_DAYS
+            f["pmax"] = max(1, min(FLOW_ROWS, flow_days))
+            f["pdef"] = min(f.get("pdef", 5), f["pmax"])
+    write_json(os.path.join(data_dir, "fields.json"), fields)
     write_json(os.path.join(data_dir, "meta.json"), {
         "mode": mode, "base_date": base_date,
         "updated_at": now_kst().strftime("%Y-%m-%d %H:%M"),
@@ -394,6 +456,8 @@ def build(listing, prices, errors, mode):
         "ichi_shift": ind.ICHI_SHIFT, "sector_source": ssrc,
         "news": {k: v for k, v in nstatus.items() if k != "eng_names"},
         "hist": {"version": hv, "stocks": hn, "days": hd, "bytes": hsize},
+        "flows": {**{k: v for k, v in fstatus.items()}, "days": flow_days, "last": fdates[-1] if fdates else None,
+                  "bt_days": FLOW_BT_DAYS},
     })
     open(os.path.join(SITE, ".nojekyll"), "w").close()
     log("site/ 생성 완료")

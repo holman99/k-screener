@@ -49,6 +49,52 @@ def _days_since_cross(diff, up=True, lookback=CROSS_LOOKBACK):
     return np.nan
 
 
+# ---------------------------------------------------------------- 캔들 패턴
+PAT_LOOKBACK = 20        # '최근 N일 안에' 최대 N
+PAT_NONE = 99            # 최근 20일 안에 없음
+PATTERNS = ["pat_hammer", "pat_invhammer", "pat_doji", "pat_bigup", "pat_bigdn", "pat_engulf_up", "pat_engulf_dn",
+            "pat_harami_up", "pat_harami_dn", "pat_mstar", "pat_estar", "pat_gapup", "pat_gapdn"]
+
+
+def candle_patterns(df):
+    """날짜별 패턴 발생 여부(True/False). 브라우저 백테스트(bt-engine.js)와 같은 정의입니다."""
+    o, h, l, c = (df[k].astype(float) for k in ("Open", "High", "Low", "Close"))
+    R = h - l
+    body = (c - o).abs()
+    up = h - np.maximum(o, c)
+    lo = np.minimum(o, c) - l
+    valid = R > 0
+    o1, h1, l1, c1 = o.shift(1), h.shift(1), l.shift(1), c.shift(1)
+    body1, R1 = (c1 - o1).abs(), h1 - l1
+    o2, c2 = o.shift(2), c.shift(2)
+    body2, R2 = (c2 - o2).abs(), h.shift(2) - l.shift(2)
+    mid2 = (o2 + c2) / 2
+    P = pd.DataFrame(index=df.index)
+    P["pat_hammer"] = valid & (lo >= 2 * body) & (lo >= 0.6 * R) & (up <= 0.15 * R)
+    P["pat_invhammer"] = valid & (up >= 2 * body) & (up >= 0.6 * R) & (lo <= 0.15 * R)
+    P["pat_doji"] = valid & (body <= 0.1 * R)
+    P["pat_bigup"] = valid & (c > o) & (body >= 0.7 * R) & ((c - o) / o >= 0.05)
+    P["pat_bigdn"] = valid & (c < o) & (body >= 0.7 * R) & ((o - c) / o >= 0.05)
+    P["pat_engulf_up"] = (c1 < o1) & (c > o) & (o <= c1) & (c >= o1) & (body > body1)
+    P["pat_engulf_dn"] = (c1 > o1) & (c < o) & (o >= c1) & (c <= o1) & (body > body1)
+    P["pat_harami_up"] = (c1 < o1) & (body1 >= 0.6 * R1) & (c > o) & (np.maximum(o, c) <= o1) & (np.minimum(o, c) >= c1) & (body <= 0.5 * body1)
+    P["pat_harami_dn"] = (c1 > o1) & (body1 >= 0.6 * R1) & (c < o) & (np.maximum(o, c) <= c1) & (np.minimum(o, c) >= o1) & (body <= 0.5 * body1)
+    P["pat_mstar"] = (c2 < o2) & (body2 >= 0.6 * R2) & (body1 <= 0.3 * body2) & ((o1 + c1) / 2 < c2) & (c > o) & (c >= mid2)
+    P["pat_estar"] = (c2 > o2) & (body2 >= 0.6 * R2) & (body1 <= 0.3 * body2) & ((o1 + c1) / 2 > c2) & (c < o) & (c <= mid2)
+    P["pat_gapup"] = l > h1
+    P["pat_gapdn"] = h < l1
+    return P.fillna(False).astype(bool)
+
+
+def _streak(mask):
+    n = 0
+    for v in mask[::-1]:
+        if not v:
+            break
+        n += 1
+    return float(n)
+
+
 # ---------------------------------------------------------------- 전체 지표
 def full_indicators(df):
     """df: Date 인덱스, Open/High/Low/Close/Volume 열"""
@@ -168,6 +214,13 @@ def snapshot_row(df, ind=None):
     for n in SECTOR_PERIODS:
         p = c_s.iloc[-1 - n] if len(c_s) > n else np.nan
         r[f"ret{n}"] = (c / p - 1) * 100 if p and not np.isnan(p) else np.nan
+    P = candle_patterns(df.tail(PAT_LOOKBACK + 3)).tail(PAT_LOOKBACK)
+    for k in PATTERNS:
+        hits = np.flatnonzero(P[k].values)
+        r[k] = float(len(P) - 1 - hits[-1]) if len(hits) else float(PAT_NONE)
+    o_, c_ = df["Open"].astype(float).values, c_s.values
+    r["up_streak"] = _streak(c_ > o_)
+    r["dn_streak"] = _streak(c_ < o_)
     return r
 
 
@@ -263,6 +316,35 @@ FIELDS += [
     _f("뉴스", "gnews7d", "해외(영문) 기사 수 (최근 7일)", unit="건", bt=False,
        desc="시가총액 상위 종목만 집계합니다"),
 ]
+PAT_DESC = {
+    "pat_hammer": ("아랫꼬리 망치형", "아랫꼬리가 몸통의 2배 이상이고 하루 변동폭의 60% 이상, 윗꼬리는 15% 이하"),
+    "pat_invhammer": ("윗꼬리 망치형 (역망치·유성형)", "윗꼬리가 몸통의 2배 이상이고 하루 변동폭의 60% 이상, 아랫꼬리는 15% 이하"),
+    "pat_doji": ("십자형 (도지)", "몸통이 하루 변동폭(고가−저가)의 10% 이하"),
+    "pat_bigup": ("장대양봉", "시가 대비 +5% 이상 오른 양봉, 몸통이 하루 변동폭의 70% 이상"),
+    "pat_bigdn": ("장대음봉", "시가 대비 −5% 이상 내린 음봉, 몸통이 하루 변동폭의 70% 이상"),
+    "pat_engulf_up": ("상승장악형", "전날 음봉의 몸통을 오늘 양봉 몸통이 완전히 감쌈"),
+    "pat_engulf_dn": ("하락장악형", "전날 양봉의 몸통을 오늘 음봉 몸통이 완전히 감쌈"),
+    "pat_harami_up": ("상승잉태형", "전날 큰 음봉 몸통 안에 오늘 작은 양봉(몸통 절반 이하)"),
+    "pat_harami_dn": ("하락잉태형", "전날 큰 양봉 몸통 안에 오늘 작은 음봉(몸통 절반 이하)"),
+    "pat_mstar": ("샛별형 (3일)", "큰 음봉 → 아래쪽 작은 봉 → 큰 음봉 몸통 절반 위까지 오른 양봉"),
+    "pat_estar": ("석별형 (3일)", "큰 양봉 → 위쪽 작은 봉 → 큰 양봉 몸통 절반 아래까지 내린 음봉"),
+    "pat_gapup": ("갭상승", "오늘 저가가 전날 고가보다 높음 (빈 공간)"),
+    "pat_gapdn": ("갭하락", "오늘 고가가 전날 저가보다 낮음 (빈 공간)"),
+}
+for _k in PATTERNS:
+    FIELDS.append(_f("차트 모양", _k, PAT_DESC[_k][0], "pattern", desc=PAT_DESC[_k][1]))
+FIELDS += [
+    _f("차트 모양", "up_streak", "연속 양봉 일수 (종가 > 시가)", unit="일"),
+    _f("차트 모양", "dn_streak", "연속 음봉 일수 (종가 < 시가)", unit="일"),
+]
+FLOW_INV = {"ind": "개인", "frg": "외국인", "inst": "기관"}
+for _k, _n in FLOW_INV.items():
+    FIELDS.append(_f("수급 (개인·외국인·기관)", f"flow_{_k}_ratio_n", f"{_n} 순매수 비중 (최근 N일)", unit="%", param="N",
+                     pdef=5, pmax=20, bt=False,
+                     desc=f"N일 동안 {_n} 순매수 금액 ÷ 같은 기간 거래대금. +면 매수 우위, −면 매도 우위"))
+for _k, _n in FLOW_INV.items():
+    FIELDS.append(_f("수급 (개인·외국인·기관)", f"flow_{_k}_days_n", f"{_n} 순매수한 날 수 (최근 N일)", unit="일", param="N",
+                     pdef=5, pmax=20, bt=False, desc=f"최근 N일 중 {_n}가 순매수(+)였던 날의 수"))
 for _f_ in FIELDS:
     _f_.setdefault("bt", True)
 FIELD_MAP = {f["key"]: f for f in FIELDS}
